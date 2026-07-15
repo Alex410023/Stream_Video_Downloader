@@ -54,7 +54,7 @@ def create_zip_release():
     if os.path.exists(os.path.join(dist_dir, app_path)):
         # Переходим в папку dist и используем системную команду zip (сохраняет права файлов macOS)
         os.chdir(dist_dir)
-        subprocess.run(["zip", "-q", "-r", zip_name, app_path], check=True)
+        subprocess.run(["zip", "-q", "-ry", zip_name, app_path], check=True)
         os.chdir("..")
         print(f"  [+] Архив успешно создан: dist/{zip_name}")
     else:
