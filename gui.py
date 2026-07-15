@@ -49,6 +49,16 @@ class MovieRowWidget(QFrame):
         self.init_ui()
         self.check_for_updates()
 
+    def check_for_updates(self):
+        """Запускает фоновую проверку обновлений."""
+        self.updater_thread = UpdateChecker(CURRENT_VERSION, GITHUB_OWNER, GITHUB_REPO)
+        self.updater_thread.update_available.connect(self.on_update_available)
+
+        # --- ДОБАВЬТЕ ЭТУ СТРОКУ ДЛЯ ТЕСТА ---
+        self.updater_thread.error.connect(lambda err: self.append_log(f"⚠️ {err}"))
+
+        self.updater_thread.start()
+
     def init_ui(self):
         layout = QVBoxLayout(self)
         layout.setSpacing(10)
@@ -241,6 +251,7 @@ class MainWindow(QMainWindow):
         self.episode_rows = []
 
         self.init_ui()
+        self.check_for_updates()
 
     def init_ui(self):
         central_widget = QWidget()
@@ -476,13 +487,15 @@ class MainWindow(QMainWindow):
         self.logic.start_download(queue, download_dir)
 
     def check_for_updates(self):
-        """Запускает фоновую проверку обновлений."""
+        """Запускает фоновую проверку обновлений на GitHub."""
         self.updater_thread = UpdateChecker(CURRENT_VERSION, GITHUB_OWNER, GITHUB_REPO)
         self.updater_thread.update_available.connect(self.on_update_available)
+        # Добавляем вывод ошибки прямо в логи программы на случай сбоя сети или SSL
+        self.updater_thread.error.connect(lambda err: self.append_log(f"⚠️ {err}"))
         self.updater_thread.start()
 
     def on_update_available(self, version, changelog, download_url):
-        """Спрашивает пользователя, хочет ли он обновиться."""
+        """Вызывает диалоговое окно с предложением обновиться."""
         reply = QMessageBox.question(
             self, "Доступно обновление",
             f"Вышла новая версия: {version}!\n\nЧто нового:\n{changelog}\n\nХотите обновить приложение сейчас?",
@@ -492,7 +505,7 @@ class MainWindow(QMainWindow):
             self.start_downloading_update(download_url)
 
     def start_downloading_update(self, download_url):
-        """Показывает прогресс-бар скачивания новой версии."""
+        """Запускает скачивание и показывает прогресс-бар."""
         self.upd_progress_dialog = QProgressDialog("Скачивание обновления...", "Отмена", 0, 100, self)
         self.upd_progress_dialog.setWindowTitle("Обновление")
         self.upd_progress_dialog.setWindowModality(Qt.WindowModality.WindowModal)
@@ -505,7 +518,7 @@ class MainWindow(QMainWindow):
         self.download_thread.finished.connect(self.on_update_downloaded)
         self.download_thread.error.connect(self.on_update_error)
 
-        # Если нажали "Отмена" при скачивании
+        # Если пользователь нажал кнопку "Отмена" на прогресс-баре
         self.upd_progress_dialog.canceled.connect(self.download_thread.terminate)
 
         self.download_thread.start()
@@ -517,7 +530,8 @@ class MainWindow(QMainWindow):
         apply_update_and_restart(extracted_app_path)
 
     def on_update_error(self, error_msg):
-        if hasattr(self, 'upd_progress_dialog'):
+        """Вызывается в случае ошибки при скачивании архива."""
+        if hasattr(self, 'upd_progress_dialog') and self.upd_progress_dialog:
             self.upd_progress_dialog.close()
         QMessageBox.critical(self, "Ошибка обновления", f"Не удалось обновить приложение:\n{error_msg}")
 
