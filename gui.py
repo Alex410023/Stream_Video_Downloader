@@ -47,7 +47,6 @@ class MovieRowWidget(QFrame):
             }
         """)
         self.init_ui()
-        self.check_for_updates()
 
     def check_for_updates(self):
         """Запускает фоновую проверку обновлений."""
@@ -383,6 +382,56 @@ class MainWindow(QMainWindow):
         self.append_log(
             "Система готова. Настройте файлы и нажмите 'Начать загрузку'. Размеры окон логов и настроек можно менять перетаскиванием разделителя.")
 
+        # ================= Вкладка 3: О программе =================
+        self.tab_about = QWidget()
+        about_layout = QVBoxLayout(self.tab_about)
+        about_layout.setSpacing(15)
+        about_layout.setContentsMargins(30, 40, 30, 40)
+        about_layout.setAlignment(Qt.AlignmentFlag.AlignCenter)
+
+        # Крупное название программы
+        title_label = QLabel("Stream Video Downloader")
+        title_label.setStyleSheet("font-size: 24px; font-weight: bold; color: #0078d7; margin-bottom: 5px;")
+        title_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        about_layout.addWidget(title_label)
+
+        # Текущая версия (динамически берется из config.py)
+        version_label = QLabel(f"Версия: {CURRENT_VERSION}")
+        version_label.setStyleSheet("font-size: 14px; color: #aaaaaa; font-weight: bold;")
+        version_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        about_layout.addWidget(version_label)
+
+        # Разделительная линия
+        line = QFrame()
+        line.setFrameShape(QFrame.Shape.HLine)
+        line.setStyleSheet("background-color: #3d3d3d; max-height: 1px; margin: 10px 0;")
+        about_layout.addWidget(line)
+
+        # Информация о разработчике и ссылка на GitHub
+        info_text = QLabel(
+            "Разработчик: <b>Alex410023</b><br><br>"
+            "Исходный код проекта открыт и доступен на GitHub:<br>"
+            "<a href='https://github.com/Alex410023/Stream_Video_Downloader' style='color: #0078d7; text-decoration: none;'>github.com/Alex410023/Stream_Video_Downloader</a>"
+        )
+        info_text.setOpenExternalLinks(True)  # Делает ссылку кликабельной (откроется в браузере)
+        info_text.setStyleSheet("font-size: 13px; line-height: 1.6; color: #dddddd;")
+        info_text.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        about_layout.addWidget(info_text)
+
+        # Кнопка ручной проверки обновлений
+        self.manual_update_btn = QPushButton("🔄 Проверить обновления")
+        self.manual_update_btn.setFixedWidth(220)
+        self.manual_update_btn.setStyleSheet("""
+                    QPushButton { background-color: #2d2d2d; border: 1px solid #3d3d3d; padding: 10px; border-radius: 4px; font-weight: bold; margin-top: 15px;}
+                    QPushButton:hover { background-color: #3d3d3d; border-color: #0078d7; }
+                    QPushButton:pressed { background-color: #1e1e1e; }
+                """)
+        self.manual_update_btn.clicked.connect(self.manual_check_for_updates)
+        about_layout.addWidget(self.manual_update_btn, alignment=Qt.AlignmentFlag.AlignCenter)
+
+        # Добавляем вкладку в общий виджет
+        self.tabs.addTab(self.tab_about, "ℹ️ О программе")
+
     def add_movie_row(self):
         """Добавляет карточку фильма."""
         row = MovieRowWidget(self.remove_movie_row)
@@ -553,3 +602,39 @@ class MainWindow(QMainWindow):
         self.cancel_btn.hide()
         self.cancel_btn.setEnabled(True)
         self.progress_bar.hide()
+
+    def manual_check_for_updates(self):
+        """Ручной запуск проверки обновлений по кнопке во вкладке."""
+        self.append_log("🔍 Ручная проверка наличия обновлений...")
+        self.manual_update_btn.setEnabled(False)
+        self.manual_update_btn.setText("⏳ Проверяю...")
+        self.manual_update_found = False
+
+        self.manual_updater = UpdateChecker(CURRENT_VERSION, GITHUB_OWNER, GITHUB_REPO)
+        self.manual_updater.update_available.connect(self.on_manual_update_available)
+        self.manual_updater.finished.connect(self.on_manual_check_finished)
+        self.manual_updater.error.connect(self.on_manual_check_error)
+        self.manual_updater.start()
+
+    def on_manual_update_available(self, version, changelog, download_url):
+        """Вызывается, если при ручной проверке найдено обновление."""
+        self.manual_update_found = True
+        self.on_update_available(version, changelog, download_url)
+
+    def on_manual_check_finished(self):
+        """Вызывается, когда поток проверки завершил работу."""
+        self.manual_update_btn.setEnabled(True)
+        self.manual_update_btn.setText("🔄 Проверить обновления")
+
+        if not self.manual_update_found:
+            QMessageBox.information(
+                self, "Обновления",
+                "У вас установлена самая актуальная версия программы!"
+            )
+            self.append_log("✅ Проверка завершена: у вас установлена последняя версия программы.")
+
+    def on_manual_check_error(self, err_msg):
+        """Вызывается при ошибке сети во время ручной проверки."""
+        self.manual_update_btn.setEnabled(True)
+        self.manual_update_btn.setText("🔄 Проверить обновления")
+        self.on_update_error(err_msg)
