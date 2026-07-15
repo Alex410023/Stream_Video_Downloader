@@ -4,6 +4,6 @@ import os
 DEFAULT_DOWNLOAD_DIR = os.path.join(os.path.expanduser("~"), "Downloads")
 
 # Настройки обновления (для связи с GitHub)
-CURRENT_VERSION = "v1.0.4"
+CURRENT_VERSION = "v1.0.6"
 GITHUB_OWNER = "Alex410023"
 GITHUB_REPO = "Stream_Video_Downloader"

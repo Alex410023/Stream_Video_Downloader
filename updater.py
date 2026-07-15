@@ -2,7 +2,6 @@ import os
 import sys
 import json
 import urllib.request
-import zipfile
 import tempfile
 import subprocess
 from PyQt6.QtCore import QThread, pyqtSignal
@@ -72,9 +71,9 @@ class UpdateDownloader(QThread):
                             percent = int((downloaded / total_size) * 100)
                             self.progress.emit(percent)
 
-            # Распаковываем zip
-            with zipfile.ZipFile(self.zip_path, 'r') as zip_ref:
-                zip_ref.extractall(self.temp_dir)
+            # Распаковываем zip с помощью встроенного в macOS системного архиватора 'unzip',
+            # чтобы гарантированно сохранить права запуска исполняемых файлов (+x)
+            subprocess.run(["unzip", "-q", self.zip_path, "-d", self.temp_dir], check=True)
 
             # Ищем распакованный .app файл
             extracted_app_path = None
