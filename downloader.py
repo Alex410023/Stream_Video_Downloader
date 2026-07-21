@@ -39,6 +39,16 @@ def download_process(queue, download_dir, on_log, on_progress, on_done, check_ca
         else:
             output_base = output_name
 
+        orig_output_base = output_base
+        counter = 1
+        base_path = os.path.join(download_dir, output_base)
+        # Проверяем, существует ли уже файл с таким именем (mp4, mkv, vtt или srt)
+        while os.path.exists(f"{base_path}.mp4") or os.path.exists(f"{base_path}.mkv") or os.path.exists(
+                f"{base_path}.vtt") or os.path.exists(f"{base_path}.srt"):
+            output_base = f"{orig_output_base} ({counter})"
+            base_path = os.path.join(download_dir, output_base)
+            counter += 1
+
         title = output_base
         on_log("-" * 40)
         on_log(f"🔄 [{i + 1}/{len(queue)}] Обрабатываю: {title}...")
@@ -91,7 +101,6 @@ def download_process(queue, download_dir, on_log, on_progress, on_done, check_ca
                 percent_str = d.get('_percent_str', '0%')
                 clean_percent = re.sub(r'\x1b\[[0-9;]*m', '', percent_str).replace('%', '').strip()
 
-                # Читаем данные от yt-dlp
                 speed = d.get('_speed_str', '0 B/s').strip()
                 downloaded = d.get('_downloaded_bytes_str', '0 B').strip()
 
@@ -179,7 +188,16 @@ def download_process(queue, download_dir, on_log, on_progress, on_done, check_ca
         # Сборка через FFmpeg (если есть и видео, и субтитры)
         if sub_path and os.path.exists(video_path):
             on_log("🔗 Склеиваю видео и субтитры в .mkv...")
-            ffmpeg_cmd = [get_ffmpeg_path(), "-y", "-i", video_path, "-i", sub_path, "-c", "copy", final_mkv]
+            ffmpeg_cmd = [
+                "ffmpeg", "-y",
+                "-fflags", "+genpts",  # Принудительно восстанавливаем ровную шкалу времени видео
+                "-i", video_path,
+                "-i", sub_path,
+                "-c:v", "copy",  # Видео копируем без пересжатия
+                "-c:a", "copy",  # Аудио копируем без пересжатия
+                "-c:s", "subrip",  # Субтитры vtt пережимаем в сверхустойчивый srt (subrip)
+                final_mkv
+            ]
             try:
                 subprocess.run(ffmpeg_cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
                 on_log(f"🎉 Готово! Файл сохранен: {final_mkv}")

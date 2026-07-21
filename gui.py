@@ -1,8 +1,9 @@
+import os
 import sys
 from PyQt6.QtWidgets import (QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
                              QLineEdit, QPushButton, QTextEdit, QScrollArea,
                              QProgressBar, QLabel, QTabWidget, QFrame, QSplitter,
-                             QMessageBox, QProgressDialog, QFileDialog)
+                             QMessageBox, QProgressDialog, QFileDialog, QTextBrowser)
 from PyQt6.QtCore import Qt, QObject, pyqtSignal
 from PyQt6.QtGui import QFont
 
@@ -10,9 +11,23 @@ from config import DEFAULT_DOWNLOAD_DIR, CURRENT_VERSION, GITHUB_OWNER, GITHUB_R
 from updater import UpdateChecker, UpdateDownloader, apply_update_and_restart
 from logic import DownloaderLogic
 
-# ИМПОРТИРУЕМ НАШИ КАРТОЧКИ ИЗ НОВОГО ФАЙЛА
 from gui_widgets import MovieRowWidget, EpisodeRowWidget
 
+
+def get_asset_path(filename, as_url=True):
+    """Возвращает путь к файлу картинки (as_url=True для HTML, as_url=False для системы)."""
+    import sys
+    import os
+    from PyQt6.QtCore import QUrl
+
+    if getattr(sys, 'frozen', False):
+        path = os.path.join(sys._MEIPASS, 'assets', filename)
+    else:
+        path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'assets', filename)
+
+    if as_url:
+        return QUrl.fromLocalFile(path).toString()
+    return path
 
 class GUISignals(QObject):
     log_signal = pyqtSignal(str)
@@ -145,35 +160,50 @@ class MainWindow(QMainWindow):
         inst_main_layout = QVBoxLayout(self.tab_instructions)
         inst_main_layout.setContentsMargins(10, 10, 10, 10)
 
-        inst_scroll = QScrollArea()
-        inst_scroll.setWidgetResizable(True)
-        inst_scroll.setStyleSheet("QScrollArea { border: none; background-color: transparent; }")
+        # Используем QTextBrowser вместо QLabel + QScrollArea.
+        # Он идеально поддерживает прокрутку, выделение, копирование (в т.ч. через правую кнопку мыши) и клики по картинкам.
+        self.inst_browser = QTextBrowser()
+        self.inst_browser.setOpenExternalLinks(False)
+        self.inst_browser.setOpenLinks(False)
+        self.inst_browser.setReadOnly(True)
+        self.inst_browser.setStyleSheet("""
+                    QTextBrowser {
+                        border: none;
+                        background-color: transparent;
+                        font-size: 13px;
+                        color: #dddddd;
+                    }
+                """)
 
-        inst_content = QWidget()
-        inst_content.setStyleSheet("background-color: transparent;")
-        inst_layout = QVBoxLayout(inst_content)
-        inst_layout.setSpacing(15)
-        inst_layout.setContentsMargins(10, 10, 10, 10)
+        # Получаем пути к скриншотам
+        safari_img = get_asset_path("safari_dev.png", as_url=True)
+        filter_img = get_asset_path("filter_devtools.png", as_url=True)
+        master_img = get_asset_path("master_example.png", as_url=True)
+        sub_example_img = get_asset_path("sub_example.png", as_url=True)
 
-        inst_header = QLabel("Как пользоваться программой")
-        inst_header.setStyleSheet("font-size: 20px; font-weight: bold; color: #0078d7; margin-bottom: 5px;")
-        inst_header.setAlignment(Qt.AlignmentFlag.AlignLeft)
-        inst_layout.addWidget(inst_header)
+        inst_html = (
+            "<h2>📖 Как пользоваться программой</h2><br>"
+            "<h3>🍏 Важно для пользователей браузера Safari</h3>"
+            "Если вы пользуетесь браузером Safari, панель разработчика по умолчанию скрыта. Чтобы её включить:<br>"
+            "1. Откройте меню <b>Safari -> Настройки</b> (или нажмите сочетание клавиш <code style='background-color: #3d3d3d; color: #ffffff; padding: 2px 6px; border-radius: 4px; font-family: monospace;'>Cmd + ,</code>).<br>"
+            "2. Перейдите во вкладку <b>Дополнения</b> (Advanced).<br>"
+            "3. В самом низу поставьте галочку <b>«Показывать функции для веб-разработчиков»</b> (или <i>«Показывать меню Разработка в строке меню»</i>).<br>"
+            f"<br><a href='safari_dev.png'><img src='{safari_img}' width='600'></a><br><br>"
+            "После этого открыть консоль разработчика можно будет сочетанием клавиш <code style='background-color: #3d3d3d; color: #ffffff; padding: 2px 6px; border-radius: 4px; font-family: monospace;'>Option + Cmd + I</code>.<br><br>"
 
-        # Текст инструкции с HTML-разметкой
-        # Текст инструкции с новой HTML-разметкой
-        inst_text = QLabel(
             "<h3>Шаг 1. Откройте нужный сайт в браузере</h3>"
             "Зайдите на сайт с фильмом или сериалом и перейдите на страницу с видеоплеером.<br><br>"
 
             "<h3>Шаг 2. Откройте панель разработчика (DevTools)</h3>"
-            "Для этого нажмите сочетание клавиш на клавиатуре:<br>"
+            "Нажмите сочетание клавиш на клавиатуре:<br>"
             "• На Mac: <code style='background-color: #3d3d3d; color: #ffffff; padding: 3px 6px; border-radius: 4px; font-family: monospace;'>Option + Cmd + I</code><br>"
             "• На Windows/Linux: <code style='background-color: #3d3d3d; color: #ffffff; padding: 3px 6px; border-radius: 4px; font-family: monospace;'>F12</code> или <code style='background-color: #3d3d3d; color: #ffffff; padding: 3px 6px; border-radius: 4px; font-family: monospace;'>Ctrl + Shift + I</code><br><br>"
 
             "<h3>Шаг 3. Перейдите во вкладку Network (Сеть) и настройте фильтр</h3>"
-            "В открывшейся панели выберите вкладку <b>Network</b> (Сеть) и в поле поиска/фильтра (<b>Filter</b>) вверху слева сразу введите: "
-            "<code style='background-color: #3d3d3d; color: #ffffff; padding: 2px 4px; border-radius: 3px;'>.m3u8</code>.<br>"
+            "В открывшейся панели выберите вкладку <b>Network</b> (Сеть).<br>"
+            "Чтобы не путаться в тысячах запросов, воспользуйтесь полем фильтра поиска (<b>Filter</b>) в верхнем левом углу панели разработчика:<br>"
+            f"<br><a href='filter_devtools.png'><img src='{filter_img}' width='600'></a><br><br>"
+            "Введите в это поле фразу поиска: <code style='background-color: #3d3d3d; color: #ffffff; padding: 2px 4px; border-radius: 3px;'>.m3u8</code>.<br>"
             "<i>(Сделайте это строго до запуска видео, чтобы браузер не пропустил самый первый, самый важный запрос плеера. Если вы открыли вкладку Network позже и файлы не появились — просто обновите страницу кнопкой в браузере или сочетанием клавиш <code style='background-color: #3d3d3d; color: #ffffff; padding: 2px 4px; border-radius: 3px;'>Cmd+R</code> / <code style='background-color: #3d3d3d; color: #ffffff; padding: 2px 4px; border-radius: 3px;'>Ctrl+F5</code>).</i><br><br>"
 
             "<h3>Шаг 4. Запустите воспроизведение видео</h3>"
@@ -183,11 +213,16 @@ class MainWindow(QMainWindow):
             "В отфильтрованном списке Network вы увидите один или несколько файлов с расширением <code style='background-color: #3d3d3d; color: #ffffff; padding: 2px 4px; border-radius: 3px;'>.m3u8</code>.<br><br>"
 
             "<h3>💡 Как определить, какая именно ссылка вам нужна?</h3>"
-            "Сайты могут отправлять множество сетевых запросов (название файла может быть совершенно случайным). Необязательно искать слово «master», ищите следующие характерные признаки:<br>"
-            "1. <b>Самый первый по времени:</b> Нужный плейлист почти всегда загружается в первую же секунду при открытии плеера.<br>"
-            "2. <b>Игнорируйте файлы сегментов:</b> Если в списке сыплются десятки файлов каждую секунду (например, со словами <code style='background-color: #3d3d3d; color: #ffffff; padding: 2px 4px; border-radius: 3px;'>seg</code>, <code style='background-color: #3d3d3d; color: #ffffff; padding: 2px 4px; border-radius: 3px;'>fragment</code>, <code style='background-color: #3d3d3d; color: #ffffff; padding: 2px 4px; border-radius: 3px;'>ts</code>), — это мелкие кусочки видео, они нам не нужны. Нам нужен один главный файл, который появился в самом начале.<br><br>"
+            "Сайты могут отправлять множество запросов, но нам нужен главный файл — <b>Мастер-плейлист</b>. Определить его можно по следующим характерным признакам:<br>"
+            "1. <b>Самый первый по времени:</b> Нужный плейлист всегда загружается в первую же секунду при открытии плеера (он окажется на самом верху списка).<br>"
+            "2. <b>Ориентируйтесь по типу данных:</b> В любом браузере (Chrome, Safari, Firefox) эти файлы обычно классифицируются как <b>XHR</b>, <b>Fetch</b>, <b>Document</b> или просто <b>Другое (Other)</b>.<br>"
+            "3. <b>Файл, в предпросмотре которого описаны несколько разрешений:</b> Кликните по файлу в списке и откройте вкладку <b>Preview</b> (Предпросмотр) или <b>Response</b> (Ответ) на панели справа. В нём должны быть описаны разрешения по типу 480p, 720p, 1080p:<br><br>"
+            
+            "• <b>Важно:</b> Если нужный файл субтитров или видео долгое время не появляется в списке — просто перезагрузите страницу сайта кнопкой в браузере или нажмите сочетание клавиш <code style='background-color: #3d3d3d; color: #ffffff; padding: 2px 4px; border-radius: 3px;'>Cmd+R</code> (или <code style='background-color: #3d3d3d; color: #ffffff; padding: 2px 4px; border-radius: 3px;'>Ctrl+F5</code> на Windows), чтобы плеер отправил запросы заново.<br><br>"
 
-            "<b>Пример структуры мастер-файла (если открыть его предпросмотр):</b><br>"
+            
+            f"<br><a href='master_example.png'><img src='{master_img}' width='600'></a><br><br>"
+            "<b>Пример структуры мастер-файла в предпросмотре:</b><br>"
             "<pre style='background-color: #252525; padding: 10px; border-radius: 5px; font-family: monospace; font-size: 11px; color: #0078d7;'>"
             "#EXTM3U\n"
             "#EXT-X-STREAM-INF:BANDWIDTH=2892000,RESOLUTION=1280x720\n"
@@ -195,30 +230,37 @@ class MainWindow(QMainWindow):
             "#EXT-X-STREAM-INF:BANDWIDTH=5592000,RESOLUTION=1920x1080\n"
             "./1080.mp4:hls:manifest.m3u8"
             "</pre><br>"
-            "Скопируйте ссылку на этот файл: кликните по строке правой кнопкой мыши -> <b>Copy -> Copy link address</b>.<br><br>"
+            "Если вы нашли такой файл, скопируйте на него ссылку: кликните правой кнопкой мыши -> <b>Copy -> Copy link address</b>.<br><br>"
 
             "<h3>ℹ️ Замечание: Как скачать другую озвучку или субтитры?</h3>"
             "Обычно плеер сразу подгружает видеофайл и файлы субтитров по умолчанию. Если вам нужна оригинальная звуковая дорожка или другие субтитры (например, английские):<br>"
             "1. Измените настройки языка, озвучки или субтитров в самом плеере на сайте.<br>"
-            "2. В этот момент в список Network сразу же подгрузится новый файл плейлиста. Скопируйте ссылку на него (для поиска субтитров нужно настроить фильтр на <code style='background-color: #3d3d3d; color: #ffffff; padding: 2px 4px; border-radius: 3px;'>.vtt</code> или <code style='background-color: #3d3d3d; color: #ffffff; padding: 2px 4px; border-radius: 3px;'>.srt</code>).<br><br>"
+            "2. В этот момент в список Network сразу же подгрузится новый файл плейлиста. Скопируйте ссылку на него (для поиска субтитров можно настроить фильтр на <code style='background-color: #3d3d3d; color: #ffffff; padding: 2px 4px; border-radius: 3px;'>.vtt</code> или <code style='background-color: #3d3d3d; color: #ffffff; padding: 2px 4px; border-radius: 3px;'>.srt</code>).<br><br>"
+            "• Чтобы проверить, правильный ли это файл субтитров, откройте вкладку <b>Preview</b> (Предпросмотр). Текст внутри должен выглядеть осмысленно — содержать временные метки (таймкоды) и реплики диалогов, как показано на скриншоте ниже:<br>"
+            f"<br><a href='sub_example.png'><img src='{sub_example_img}' width='600'></a><br><br>"
 
             "<h3>Шаг 6. Перенесите ссылки в программу и выберите качество</h3>"
             "Вставьте скопированную ссылку в поле <b>Видео URL</b> в приложении.<br>"
             "• Программа в фоновом режиме автоматически проанализирует поток и выведет удобный выпадающий список <b>Качество видео</b>. Выберите нужное разрешение (1080p, 720p, 480p и т.д.).<br>"
-            "• При необходимости вставьте скопированную ссылку на субтитры в поле <b>Субтитры URL</b> (если они вам нужны). Имя файла сгенерируется автоматически (при желании его можно поменять).<br><br>"
+            "• При необходимости вставьте скопированную ссылку на субтитры в поле <b>Субтитры URL</b> (если они вам нужны). Имя файла сгенерируется автоматически.<br><br>"
 
             "<h3>Шаг 7. Запустите скачивание</h3>"
             "Выберите папку для сохранения на вашем компьютере и нажмите кнопку <b>🚀 Начать загрузку</b>.<br>"
-            "<i>Программа сама скачает все фрагменты, склеит видео с субтитрами и упакует их в готовый файл.</i>"
+            "<i>Программа сама скачает все фрагменты, склеит видео с субтитрами и упакует их в готовый файл без потери качества!</i><br><br>"
+
+            "<h3>🎬 Как запустить скачанное видео и включить субтитры?</h3>"
+            "Поскольку приложение склеивает видео и субтитры в контейнер высокого разрешения <code style='background-color: #3d3d3d; color: #ffffff; padding: 2px 4px; border-radius: 3px;'>.mkv</code>, стандартный плеер Mac (QuickTime Player) не сможет его воспроизвести.<br>"
+            "• <b>Используйте VLC Player:</b> Мы настоятельно рекомендуем скачать и использовать бесплатный плеер <b>VLC Player</b> для воспроизведения ваших фильмов.<br>"
+            "• <b>Как включить субтитры в VLC:</b> Откройте видео в VLC, в верхнем меню Mac выберите: <b>Субтитры -> Дорожка субтитров</b> и выберите нужный язык (например, «Русский» или «Дорожка 1»).<br>"
+            "• <b>Что делать, если субтитры отстают или спешат:</b> Вы можете легко синхронизировать их прямо во время просмотра с помощью горячих клавиш на клавиатуре:<br>"
+            "  - Клавиша <code style='background-color: #3d3d3d; color: #ffffff; padding: 2px 6px; border-radius: 4px; font-family: monospace;'>H</code> — задерживает субтитры (сдвигает их назад на 50 мс за каждое нажатие).<br>"
+            "  - Клавиша <code style='background-color: #3d3d3d; color: #ffffff; padding: 2px 6px; border-radius: 4px; font-family: monospace;'>J</code> — ускоряет субтитры (сдвигает их вперед на 50 мс за каждое нажатие).<br>"
+            "  - С помощью этих клавиш можно идеально выровнять тайминг за пару секунд, если на сайте была заложена нестандартная задержка.<br>"
         )
 
-        inst_text.setWordWrap(True)
-        inst_text.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
-        inst_text.setStyleSheet("font-size: 13px; line-height: 1.6; color: #dddddd;")
-        inst_layout.addWidget(inst_text)
-
-        inst_scroll.setWidget(inst_content)
-        inst_main_layout.addWidget(inst_scroll)
+        self.inst_browser.setHtml(inst_html)
+        self.inst_browser.anchorClicked.connect(self.on_instruction_image_clicked)
+        inst_main_layout.addWidget(self.inst_browser)
 
         self.tabs.addTab(self.tab_instructions, "📖 Инструкция")
 
@@ -535,3 +577,42 @@ class MainWindow(QMainWindow):
         self.manual_update_btn.setEnabled(True)
         self.manual_update_btn.setText("🔄 Проверить обновления")
         self.on_update_error(err_msg)
+
+    def on_instruction_image_clicked(self, url):
+        """Открывает скриншот в красивом модальном окне, масштабируя его под размер экрана."""
+        # QTextBrowser передает объект QUrl, преобразуем его в строку имени файла
+        filename = url.toString()
+
+        # Получаем чистый системный путь к оригинальной картинке
+        local_path = get_asset_path(filename, as_url=False)
+
+        if os.path.exists(local_path):
+            from PyQt6.QtWidgets import QDialog, QVBoxLayout, QLabel
+            from PyQt6.QtGui import QPixmap
+
+            dialog = QDialog(self)
+            dialog.setWindowTitle("Просмотр изображения")
+            dialog.setWindowFlags(Qt.WindowType.Dialog | Qt.WindowType.WindowCloseButtonHint)
+
+            layout = QVBoxLayout(dialog)
+            layout.setContentsMargins(0, 0, 0, 0)
+
+            label = QLabel()
+            pixmap = QPixmap(local_path)
+
+            screen_geometry = self.screen().geometry()
+            max_width = int(screen_geometry.width() * 0.85)
+            max_height = int(screen_geometry.height() * 0.85)
+
+            scaled_pixmap = pixmap.scaled(
+                max_width, max_height,
+                Qt.AspectRatioMode.KeepAspectRatio,
+                Qt.TransformationMode.SmoothTransformation
+            )
+
+            label.setPixmap(scaled_pixmap)
+            label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            layout.addWidget(label)
+
+            label.mousePressEvent = lambda event: dialog.accept()
+            dialog.exec()
