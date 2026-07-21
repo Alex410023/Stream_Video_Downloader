@@ -1,6 +1,6 @@
 from PyQt6.QtWidgets import QFrame, QVBoxLayout, QHBoxLayout, QLineEdit, QLabel, QPushButton, QSpinBox, QComboBox
-from name_generator import generate_movie_name, generate_series_name
-from resolution_parser import ResolutionParser
+from src.name_generator import generate_movie_name, generate_series_name
+from src.resolution_parser import ResolutionParser
 
 
 class MovieRowWidget(QFrame):

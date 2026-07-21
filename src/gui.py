@@ -1,5 +1,4 @@
 import os
-import sys
 from PyQt6.QtWidgets import (QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
                              QLineEdit, QPushButton, QTextEdit, QScrollArea,
                              QProgressBar, QLabel, QTabWidget, QFrame, QSplitter,
@@ -7,11 +6,10 @@ from PyQt6.QtWidgets import (QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
 from PyQt6.QtCore import Qt, QObject, pyqtSignal
 from PyQt6.QtGui import QFont
 
-from config import DEFAULT_DOWNLOAD_DIR, CURRENT_VERSION, GITHUB_OWNER, GITHUB_REPO
-from updater import UpdateChecker, UpdateDownloader, apply_update_and_restart
-from logic import DownloaderLogic
-
-from gui_widgets import MovieRowWidget, EpisodeRowWidget
+from src.config import DEFAULT_DOWNLOAD_DIR, CURRENT_VERSION, GITHUB_OWNER, GITHUB_REPO
+from src.updater import UpdateChecker, UpdateDownloader, apply_update_and_restart
+from src.logic import DownloaderLogic
+from src.gui_widgets import MovieRowWidget, EpisodeRowWidget
 
 
 def get_asset_path(filename, as_url=True):
@@ -23,7 +21,7 @@ def get_asset_path(filename, as_url=True):
     if getattr(sys, 'frozen', False):
         path = os.path.join(sys._MEIPASS, 'assets', filename)
     else:
-        path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'assets', filename)
+        path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'assets', filename)
 
     if as_url:
         return QUrl.fromLocalFile(path).toString()

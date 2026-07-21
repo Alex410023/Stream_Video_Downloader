@@ -3,7 +3,7 @@ import shutil
 import subprocess
 
 APP_NAME = "Stream Video Downloader"
-ICON_NAME = "icon.icns"
+ICON_NAME = os.path.join("assets", "icon.icns")
 
 
 def clean_old_builds():
@@ -30,6 +30,7 @@ def build_app():
         "--windowed",
         f"--name={APP_NAME}",
         f"--add-binary=ffmpeg:.",
+        "--add-data=assets:assets",
         "main.py"
     ]
 

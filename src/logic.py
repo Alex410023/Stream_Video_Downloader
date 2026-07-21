@@ -1,5 +1,5 @@
 import threading
-from downloader import download_process
+from src.downloader import download_process
 
 class DownloaderLogic:
     def __init__(self, on_log, on_progress, on_done):

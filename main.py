@@ -1,7 +1,7 @@
 import sys
 from PyQt6.QtWidgets import QApplication, QMessageBox
-from gui import MainWindow
-from config import CURRENT_VERSION, GITHUB_OWNER, GITHUB_REPO
+from src.gui import MainWindow
+from src.config import CURRENT_VERSION, GITHUB_OWNER, GITHUB_REPO
 import urllib.request
 import json
 

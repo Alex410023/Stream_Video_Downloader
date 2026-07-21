@@ -11,8 +11,8 @@ def get_ffmpeg_path():
         # Если запущено как скомпилированное приложение
         return os.path.join(sys._MEIPASS, 'ffmpeg')
     else:
-        # Если запущено из исходников (ищет в папке со скриптом или в системе)
-        return 'ffmpeg'
+        # Если запущено из исходников (на уровень выше относительно src/downloader.py)
+        return os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'ffmpeg')
 
 def download_process(queue, download_dir, on_log, on_progress, on_done, check_cancelled):
     """
