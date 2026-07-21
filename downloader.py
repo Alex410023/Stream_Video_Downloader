@@ -90,17 +90,63 @@ def download_process(queue, download_dir, on_log, on_progress, on_done, check_ca
             if d['status'] == 'downloading':
                 percent_str = d.get('_percent_str', '0%')
                 clean_percent = re.sub(r'\x1b\[[0-9;]*m', '', percent_str).replace('%', '').strip()
+
+                # Читаем данные от yt-dlp
+                speed = d.get('_speed_str', '0 B/s').strip()
+                downloaded = d.get('_downloaded_bytes_str', '0 B').strip()
+
+                # Пробуем получить общий размер от yt-dlp
+                total = d.get('_total_bytes_str') or d.get('_total_bytes_estimate_str')
+
+                # --- РЕШЕНИЕ: Если размер N/A, рассчитываем его математически ---
+                if not total:
+                    try:
+                        pct = float(clean_percent)
+                        downloaded_bytes = d.get('downloaded_bytes')
+                        if pct > 0 and downloaded_bytes:
+                            # Рассчитываем примерный итоговый вес файла
+                            estimated_total_bytes = downloaded_bytes / (pct / 100.0)
+
+                            # Красиво форматируем байты в человекочитаемый вид (KiB, MiB, GiB)
+                            def format_bytes(b):
+                                for unit in ['B', 'KiB', 'MiB', 'GiB', 'TiB']:
+                                    if b < 1024.0:
+                                        return f"{b:.2f}{unit}"
+                                    b /= 1024.0
+                                return f"{b:.2f}PiB"
+
+                            total = format_bytes(estimated_total_bytes)
+                    except Exception:
+                        pass
+
+                # Дефолтный фоллбек, если расчет не удался
+                if not total:
+                    total = 'N/A'
+                else:
+                    total = total.strip()
+
+                status_text = f"Скачано: {downloaded} из {total} ({percent_str.strip()}) | Скорость: {speed}"
+
                 try:
                     val = int(float(clean_percent))
-                    on_progress(val)
+                    on_progress(val, status_text)
                 except ValueError:
                     pass
 
+
+        # Читаем выбранное пользователем качество (если его нет, по умолчанию берем 'best')
+        selected_height = item.get('selected_height', 'best')
+
+        # Динамически настраиваем формат скачивания под выбранное разрешение
+        if selected_height and selected_height != 'best':
+            video_format = f'bestvideo[height<={selected_height}]+bestaudio/best[height<={selected_height}]/best'
+        else:
+            video_format = 'bestvideo[height<=1080]+bestaudio/best[height<=1080]/best'
+
         ydl_opts = {
-            'format': 'bestvideo[height<=1080]+bestaudio/best[height<=1080]/best',
+            'format': video_format,  # <-- Сюда подставляется наш динамический формат
             'outtmpl': video_path,
             'merge_output_format': 'mp4',
-            'ffmpeg_location': get_ffmpeg_path(),
             'concurrent_fragment_downloads': 10,
             'retries': 10,
             'nocheckcertificate': True,

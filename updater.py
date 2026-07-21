@@ -51,17 +51,29 @@ class UpdateDownloader(QThread):
         self.download_url = download_url
         self.temp_dir = tempfile.mkdtemp()
         self.zip_path = os.path.join(self.temp_dir, 'update.zip')
+        self._is_cancelled = False  # Флаг для безопасной отмены
+
+    def cancel(self):
+        """Метод для безопасной отмены загрузки из интерфейса."""
+        self._is_cancelled = True
 
     def run(self):
+        import socket
+        # Устанавливаем глобальный таймаут сокета, чтобы предотвратить вечное зависание read() при обрыве сети
+        socket.setdefaulttimeout(15)
         try:
             req = urllib.request.Request(self.download_url, headers={'User-Agent': 'StreamVideoDownloader-App'})
-            with urllib.request.urlopen(req, timeout=10) as response:
+            with urllib.request.urlopen(req, timeout=15) as response:
                 total_size = int(response.info().get('Content-Length', 0))
                 downloaded = 0
                 block_size = 8192
 
                 with open(self.zip_path, 'wb') as f:
                     while True:
+                        # Если пользователь нажал "Отмена", безопасно прерываем цикл
+                        if self._is_cancelled:
+                            raise Exception("Загрузка отменена пользователем.")
+
                         buffer = response.read(block_size)
                         if not buffer:
                             break
@@ -71,8 +83,7 @@ class UpdateDownloader(QThread):
                             percent = int((downloaded / total_size) * 100)
                             self.progress.emit(percent)
 
-            # Распаковываем zip с помощью встроенного в macOS системного архиватора 'unzip',
-            # чтобы гарантированно сохранить права запуска исполняемых файлов (+x)
+            # Распаковываем zip с помощью встроенного в macOS системного архиватора 'unzip'
             subprocess.run(["unzip", "-q", self.zip_path, "-d", self.temp_dir], check=True)
 
             # Ищем распакованный .app файл
@@ -87,7 +98,7 @@ class UpdateDownloader(QThread):
             else:
                 self.error.emit("В архиве не найдено приложение (.app).")
         except Exception as e:
-            self.error.emit(f"Ошибка при скачивании: {e}")
+            self.error.emit(f"{e}")
 
 
 def apply_update_and_restart(extracted_app_path):
