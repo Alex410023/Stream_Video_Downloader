@@ -374,6 +374,7 @@ class MainWindow(QMainWindow):
             return
         self.scroll_area_movie_layout.removeWidget(row_widget)
         self.movie_rows.remove(row_widget)
+        row_widget.cancel_quality_search()
         row_widget.deleteLater()
 
     def add_episode_row(self):
@@ -389,6 +390,7 @@ class MainWindow(QMainWindow):
             return
         self.scroll_area_series_layout.removeWidget(row_widget)
         self.episode_rows.remove(row_widget)
+        row_widget.cancel_quality_search()
         row_widget.deleteLater()
 
     def append_log(self, message):
@@ -415,7 +417,7 @@ class MainWindow(QMainWindow):
 
         if active_index == 0:  # Режим Фильма
             for i, row in enumerate(self.movie_rows):
-                video_url = row.video_url.text().strip()
+                video_url = row.selected_video_url()
                 sub_url = row.sub_url.text().strip()
                 output_name = row.filename.text().strip()
 
@@ -435,7 +437,7 @@ class MainWindow(QMainWindow):
                 })
         else:  # Режим Сериала
             for i, row in enumerate(self.episode_rows):
-                video_url = row.video_url.text().strip()
+                video_url = row.selected_video_url()
                 sub_url = row.sub_url.text().strip()
                 output_name = row.filename.text().strip()
 

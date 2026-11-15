@@ -1,14 +1,82 @@
+from PyQt6.QtCore import QThreadPool, QTimer, Qt
 from PyQt6.QtWidgets import QFrame, QVBoxLayout, QHBoxLayout, QLineEdit, QLabel, QPushButton, QSpinBox, QComboBox
 from src.name_generator import generate_movie_name, generate_series_name
-from src.resolution_parser import ResolutionParser
+from src.resolution_parser import ResolutionParser, is_hls_url
 
 
-class MovieRowWidget(QFrame):
-    """Компонент (карточка) для ввода данных одного фильма."""
+class _DownloadRowWidget(QFrame):
+    VIDEO_URL_ROLE = Qt.ItemDataRole.UserRole + 1
 
     def __init__(self, remove_callback):
         super().__init__()
         self.remove_callback = remove_callback
+        self._quality_url = ''
+        self._quality_task = None
+        self._quality_timer = QTimer(self)
+        self._quality_timer.setSingleShot(True)
+        self._quality_timer.setInterval(250)
+        self._quality_timer.timeout.connect(self._start_quality_search)
+
+    def _add_quality_selector(self, layout):
+        quality_layout = QHBoxLayout()
+        self.quality_label = QLabel("Качество видео:")
+        self.quality_combo = QComboBox()
+        self.quality_combo.addItem("Авто (Максимальное)", "best")
+        quality_layout.addWidget(self.quality_label)
+        quality_layout.addWidget(self.quality_combo, stretch=1)
+        layout.addLayout(quality_layout)
+        self.quality_label.hide()
+        self.quality_combo.hide()
+
+    def cancel_quality_search(self):
+        self._quality_timer.stop()
+        if self._quality_task is not None:
+            self._quality_task.cancelled.set()
+            self._quality_task = None
+
+    def _update_quality_url(self, url):
+        if url == self._quality_url:
+            return
+        self.cancel_quality_search()
+        self._quality_url = url
+        is_hls = is_hls_url(url)
+        self.quality_combo.clear()
+        self.quality_combo.addItem("Поиск качества…" if is_hls else "Авто (Максимальное)", "best")
+        self.quality_combo.setVisible(is_hls)
+        self.quality_label.setVisible(is_hls)
+        if is_hls:
+            self._quality_timer.start()
+
+    def _start_quality_search(self):
+        self._quality_task = ResolutionParser(self._quality_url)
+        self._quality_task.signals.completed.connect(self._show_resolutions, Qt.ConnectionType.QueuedConnection)
+        QThreadPool.globalInstance().start(self._quality_task)
+
+    def _show_resolutions(self, task, options):
+        if task is not self._quality_task:
+            return
+        self._quality_task = None
+        self.quality_combo.clear()
+        if not options:
+            self.quality_combo.addItem("Авто (Максимальное)", "best")
+            return
+
+        for index, (height, direct_url) in enumerate(options):
+            self.quality_combo.addItem(f"{height}p", str(height))
+            self.quality_combo.setItemData(index, direct_url, self.VIDEO_URL_ROLE)
+        original = next((index for index, (_, url) in enumerate(options)
+                         if url is None or url == self._quality_url), 0)
+        self.quality_combo.setCurrentIndex(original)
+
+    def selected_video_url(self):
+        return self.quality_combo.currentData(self.VIDEO_URL_ROLE) or self.video_url.text().strip()
+
+
+class MovieRowWidget(_DownloadRowWidget):
+    """Компонент (карточка) для ввода данных одного фильма."""
+
+    def __init__(self, remove_callback):
+        super().__init__(remove_callback)
 
         self.setStyleSheet("""
             QFrame {
@@ -45,18 +113,7 @@ class MovieRowWidget(QFrame):
         row1.addWidget(self.video_url, stretch=1)
         layout.addLayout(row1)
 
-        # 1.5. Поле выбора качества (скрыто по умолчанию)
-        self.quality_layout = QHBoxLayout()
-        self.quality_label = QLabel("Качество видео:")
-        self.quality_combo = QComboBox()
-        self.quality_combo.addItem("Авто (Максимальное)", "best")
-        self.quality_layout.addWidget(self.quality_label, stretch=0)
-        self.quality_layout.addWidget(self.quality_combo, stretch=1)
-
-        # Прячем элементы при инициализации
-        self.quality_label.hide()
-        self.quality_combo.hide()
-        layout.addLayout(self.quality_layout)
+        self._add_quality_selector(layout)
 
         # 2. Поле для субтитров
         row2 = QHBoxLayout()
@@ -91,57 +148,14 @@ class MovieRowWidget(QFrame):
         if suggested_name:
             self.filename.setText(suggested_name)
 
-        # Если ссылка на m3u8 изменилась — запускаем фоновый анализ разрешений
-        if url.startswith("http") and ".m3u8" in url and url != getattr(self, 'last_parsed_url', ''):
-            self.last_parsed_url = url
-
-            # Останавливаем предыдущий парсер, если он работал
-            if hasattr(self, 'parser') and self.parser.isRunning():
-                try:
-                    self.parser.finished.disconnect()
-                except:
-                    pass
-                self.parser.terminate()
-
-            # Сбрасываем список и пишем статус ожидания
-            self.quality_combo.clear()
-            self.quality_combo.addItem("⏳ Анализ потока...", "best")
-            self.quality_label.show()
-            self.quality_combo.show()
-
-            self.parser = ResolutionParser(url)
-            self.parser.finished.connect(self.on_resolutions_parsed)
-            self.parser.start()
-
-        elif not ".m3u8" in url:
-            # Если это не m3u8 (например, прямая ссылка mp4), то скрываем выбор качества
-            self.quality_label.hide()
-            self.quality_combo.hide()
-            self.quality_combo.clear()
-            self.quality_combo.addItem("Авто (Максимальное)", "best")
-
-    def on_resolutions_parsed(self, heights):
-        self.quality_combo.clear()
-        if heights:
-            # Заполняем выпадающий список доступными качествами
-            for h in heights:
-                self.quality_combo.addItem(f"{h}p", h)
-            # По умолчанию ставим максимальное качество (первый элемент)
-            self.quality_combo.setCurrentIndex(0)
-        else:
-            # Если это не мастер-плейлист или произошла ошибка загрузки
-            self.quality_combo.addItem("Авто (Максимальное)", "best")
-            if not ".m3u8" in self.video_url.text():
-                self.quality_label.hide()
-                self.quality_combo.hide()
+        self._update_quality_url(url)
 
 
-class EpisodeRowWidget(QFrame):
+class EpisodeRowWidget(_DownloadRowWidget):
     """Компонент (карточка) для ввода данных одной серии."""
 
     def __init__(self, remove_callback):
-        super().__init__()
-        self.remove_callback = remove_callback
+        super().__init__(remove_callback)
 
         self.setStyleSheet("""
             QFrame {
@@ -178,18 +192,7 @@ class EpisodeRowWidget(QFrame):
         row1.addWidget(self.video_url, stretch=1)
         layout.addLayout(row1)
 
-        # 1.5. Поле выбора качества (скрыто по умолчанию)
-        self.quality_layout = QHBoxLayout()
-        self.quality_label = QLabel("Качество видео:")
-        self.quality_combo = QComboBox()
-        self.quality_combo.addItem("Авто (Максимальное)", "best")
-        self.quality_layout.addWidget(self.quality_label, stretch=0)
-        self.quality_layout.addWidget(self.quality_combo, stretch=1)
-
-        # Прячем элементы при инициализации
-        self.quality_label.hide()
-        self.quality_combo.hide()
-        layout.addLayout(self.quality_layout)
+        self._add_quality_selector(layout)
 
         # 2. Поле для субтитров
         row2 = QHBoxLayout()
@@ -241,46 +244,4 @@ class EpisodeRowWidget(QFrame):
         if suggested_name:
             self.filename.setText(suggested_name)
 
-        # Если ссылка на m3u8 изменилась — запускаем фоновый анализ разрешений
-        if url.startswith("http") and ".m3u8" in url and url != getattr(self, 'last_parsed_url', ''):
-            self.last_parsed_url = url
-
-            # Останавливаем предыдущий парсер, если он работал
-            if hasattr(self, 'parser') and self.parser.isRunning():
-                try:
-                    self.parser.finished.disconnect()
-                except:
-                    pass
-                self.parser.terminate()
-
-            # Сбрасываем список и пишем статус ожидания
-            self.quality_combo.clear()
-            self.quality_combo.addItem("⏳ Анализ потока...", "best")
-            self.quality_label.show()
-            self.quality_combo.show()
-
-            self.parser = ResolutionParser(url)
-            self.parser.finished.connect(self.on_resolutions_parsed)
-            self.parser.start()
-
-        elif not ".m3u8" in url:
-            # Если это не m3u8 (например, прямая ссылка mp4), то скрываем выбор качества
-            self.quality_label.hide()
-            self.quality_combo.hide()
-            self.quality_combo.clear()
-            self.quality_combo.addItem("Авто (Максимальное)", "best")
-
-    def on_resolutions_parsed(self, heights):
-        self.quality_combo.clear()
-        if heights:
-            # Заполняем выпадающий список доступными качествами
-            for h in heights:
-                self.quality_combo.addItem(f"{h}p", h)
-            # По умолчанию ставим максимальное качество (первый элемент)
-            self.quality_combo.setCurrentIndex(0)
-        else:
-            # Если это не мастер-плейлист или произошла ошибка загрузки
-            self.quality_combo.addItem("Авто (Максимальное)", "best")
-            if not ".m3u8" in self.video_url.text():
-                self.quality_label.hide()
-                self.quality_combo.hide()
+        self._update_quality_url(url)

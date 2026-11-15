@@ -1,18 +1,23 @@
 import os
 import re
+import shutil
+import tempfile
 import urllib.request
 import subprocess
 import yt_dlp
 import sys
 
+from src.config import VIDEO_HTTP_HEADERS
+
 def get_ffmpeg_path():
-    """Возвращает путь к ffmpeg в зависимости от того, скрипт это или скомпилированное .app"""
-    if getattr(sys, 'frozen', False):
-        # Если запущено как скомпилированное приложение
-        return os.path.join(sys._MEIPASS, 'ffmpeg')
-    else:
-        # Если запущено из исходников (на уровень выше относительно src/downloader.py)
-        return os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'ffmpeg')
+    app_dir = (sys._MEIPASS if getattr(sys, 'frozen', False)
+               else os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    bundled = shutil.which(os.path.join(app_dir, 'ffmpeg'))
+    if bundled and shutil.which(os.path.join(app_dir, 'ffprobe')):
+        return bundled
+
+    search_path = os.pathsep.join((os.environ.get('PATH', os.defpath), '/opt/homebrew/bin', '/usr/local/bin'))
+    return shutil.which('ffmpeg', path=search_path) or bundled
 
 def download_process(queue, download_dir, on_log, on_progress, on_done, check_cancelled):
     """
@@ -21,6 +26,8 @@ def download_process(queue, download_dir, on_log, on_progress, on_done, check_ca
     - Только субтитров
     - Видео + Субтитры (со склейкой)
     """
+    ffmpeg_path = get_ffmpeg_path()
+    had_errors = False
     for i, item in enumerate(queue):
         if check_cancelled():
             break
@@ -69,6 +76,7 @@ def download_process(queue, download_dir, on_log, on_progress, on_done, check_ca
                     out_file.write(response.read())
                 on_log(f"🎉 Готово! Субтитры сохранены: {sub_path}")
             except Exception as e:
+                had_errors = True
                 on_log(f"❌ Ошибка скачивания субтитров: {e}")
             on_progress(100)
             continue
@@ -84,6 +92,7 @@ def download_process(queue, download_dir, on_log, on_progress, on_done, check_ca
                     out_file.write(response.read())
                 on_log("✅ Субтитры скачаны.")
             except Exception as e:
+                had_errors = True
                 on_log(f"⚠️ Не удалось скачать субтитры: {e}")
                 sub_path = None
 
@@ -162,22 +171,22 @@ def download_process(queue, download_dir, on_log, on_progress, on_done, check_ca
             'quiet': True,
             'no_warnings': True,
             'progress_hooks': [progress_hook],
-            'http_headers': {
-                'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)',
-                'Referer': 'https://inoriginal.cc',
-                'Origin': 'https://inoriginal.cc'
-            }
+            'http_headers': VIDEO_HTTP_HEADERS.copy(),
         }
+        if ffmpeg_path:
+            ydl_opts['ffmpeg_location'] = ffmpeg_path
 
         try:
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                ydl.download([video_url])
+                if ydl.download([video_url]) or not os.path.isfile(video_path):
+                    raise RuntimeError(f"Не удалось сохранить видео в {video_path}")
             on_log("✅ Видео скачано!")
         except Exception as e:
             if "CANCELLED_BY_USER" in str(e):
                 on_log("🛑 Процесс загрузки остановлен.")
                 _cleanup(video_path, sub_path)
             else:
+                had_errors = True
                 on_log(f"❌ Ошибка загрузки видео: {e}")
             continue
 
@@ -186,33 +195,43 @@ def download_process(queue, download_dir, on_log, on_progress, on_done, check_ca
             break
 
         # Сборка через FFmpeg (если есть и видео, и субтитры)
-        if sub_path and os.path.exists(video_path):
+        if sub_path:
             on_log("🔗 Склеиваю видео и субтитры в .mkv...")
-            ffmpeg_cmd = [
-                "ffmpeg", "-y",
-                "-fflags", "+genpts",  # Принудительно восстанавливаем ровную шкалу времени видео
-                "-i", video_path,
-                "-i", sub_path,
-                "-c:v", "copy",  # Видео копируем без пересжатия
-                "-c:a", "copy",  # Аудио копируем без пересжатия
-                "-c:s", "subrip",  # Субтитры vtt пережимаем в сверхустойчивый srt (subrip)
-                final_mkv
-            ]
             try:
-                subprocess.run(ffmpeg_cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                _merge_subtitles(ffmpeg_path, video_path, sub_path, final_mkv)
                 on_log(f"🎉 Готово! Файл сохранен: {final_mkv}")
                 _cleanup(video_path, sub_path)
-            except subprocess.CalledProcessError:
-                on_log("❌ Ошибка FFmpeg при склейке. Файлы сохранены раздельно.")
+            except (OSError, subprocess.CalledProcessError) as e:
+                had_errors = True
+                details = (getattr(e, 'stderr', None) or str(e)).strip()
+                on_log(f"❌ Ошибка склейки: {details}\nВидео и субтитры сохранены раздельно.")
         else:
             on_log(f"🎉 Готово! Видео сохранено: {video_path}")
 
     if check_cancelled():
         on_log("🛑 Скачивание всей очереди было прервано.")
+    elif had_errors:
+        on_log("⚠️ Очередь завершена с ошибками.")
     else:
         on_log("🎉 Загрузка всей очереди успешно завершена!")
     on_progress(100)
     on_done()
+
+
+def _merge_subtitles(ffmpeg_path, video_path, sub_path, final_mkv):
+    if not ffmpeg_path:
+        raise FileNotFoundError("FFmpeg не найден")
+
+    with tempfile.TemporaryDirectory(dir=os.path.dirname(final_mkv)) as temp_dir:
+        temp_mkv = os.path.join(temp_dir, 'output.mkv')
+        subprocess.run([
+            ffmpeg_path, '-nostdin', '-hide_banner', '-loglevel', 'error',
+            '-abort_on', 'empty_output_stream',
+            '-i', video_path, '-i', sub_path,
+            '-map', '0:v', '-map', '0:a?', '-map', '1:s:0',
+            '-c', 'copy', '-c:s', 'subrip', temp_mkv,
+        ], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True, errors='replace')
+        os.replace(temp_mkv, final_mkv)
 
 
 def _cleanup(video_path, sub_path):

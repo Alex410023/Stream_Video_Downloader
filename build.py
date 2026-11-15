@@ -2,8 +2,31 @@ import os
 import shutil
 import subprocess
 
+from src.config import CURRENT_VERSION, GITHUB_OWNER, GITHUB_REPO
+
 APP_NAME = "Stream Video Downloader"
 ICON_NAME = os.path.join("assets", "icon.icns")
+
+
+def check_release_version():
+    version = CURRENT_VERSION.removeprefix('v')
+    remote = f'https://github.com/{GITHUB_OWNER}/{GITHUB_REPO}.git'
+    try:
+        result = subprocess.run(
+            ['git', 'ls-remote', '--tags', '--refs', remote,
+             f'refs/tags/v{version}', f'refs/tags/{version}'],
+            check=True, capture_output=True, text=True, timeout=15,
+            env={**os.environ, 'GIT_TERMINAL_PROMPT': '0'},
+        )
+    except (OSError, subprocess.SubprocessError) as error:
+        details = error.stderr.strip() if isinstance(error, subprocess.CalledProcessError) and error.stderr else str(error)
+        raise SystemExit(f'Не удалось проверить версию на GitHub. Сборка остановлена.\n{details}') from error
+
+    if result.stdout.strip():
+        raise SystemExit(
+            f'Версия {CURRENT_VERSION} уже есть на GitHub. '
+            'Обновите CURRENT_VERSION в src/config.py и повторите сборку.'
+        )
 
 
 def clean_old_builds():
@@ -20,7 +43,7 @@ def clean_old_builds():
         print(f"  [-] Удален файл {spec_file}")
 
 
-def build_app():
+def build_app(ffprobe_path):
     """Запускает PyInstaller."""
     print(f"\n🚀 Шаг 2: Сборка приложения {APP_NAME}...")
 
@@ -30,6 +53,7 @@ def build_app():
         "--windowed",
         f"--name={APP_NAME}",
         f"--add-binary=ffmpeg:.",
+        f"--add-binary={ffprobe_path}:.",
         "--add-data=assets:assets",
         "main.py"
     ]
@@ -64,8 +88,12 @@ def create_zip_release():
 
 if __name__ == "__main__":
     print(f"=== Начало процесса релиза: {APP_NAME} ===\n")
+    check_release_version()
+    ffprobe_path = shutil.which(os.path.abspath('ffprobe')) or shutil.which('ffprobe')
+    if not ffprobe_path:
+        raise SystemExit('Для сборки нужен FFprobe рядом с ffmpeg или в PATH.')
     clean_old_builds()
-    build_app()
+    build_app(ffprobe_path)
     create_zip_release()
     print("\n🎉 ГОТОВО! Все прошло успешно.")
     print(f"Перейдите в папку 'dist' — там лежит файл .zip для выгрузки на GitHub.")
