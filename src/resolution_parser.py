@@ -1,9 +1,11 @@
 import re
 import socket
+import time
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor
 from http.client import HTTPException
 from threading import Event
+from urllib.error import HTTPError
 from urllib.parse import urljoin, urlsplit
 
 from PyQt6.QtCore import QObject, QRunnable, pyqtSignal
@@ -11,7 +13,8 @@ from PyQt6.QtCore import QObject, QRunnable, pyqtSignal
 from src.config import VIDEO_HTTP_HEADERS
 
 
-COMMON_HEIGHTS = (144, 240, 360, 480, 540, 576, 720, 1080, 1440, 2160, 4320)
+COMMON_HEIGHTS = (1080, 720, 480, 2160, 1440, 576, 540, 360, 240, 144, 4320)
+RETRYABLE_HTTP_ERRORS = {408, 500, 502, 503, 504}
 PATH_HEIGHT = re.compile(r'(?<=/)([1-9]\d{2,3})(?=p/|p?\.mp4(?:/|:hls:)|p\.m3u8$)', re.IGNORECASE)
 STREAM_HEIGHT = re.compile(r'(?:^|,)RESOLUTION=\d+x(\d+)(?=,|$)', re.IGNORECASE)
 
@@ -24,17 +27,28 @@ def is_hls_url(url):
         return False
 
 
-def _read_playlist(url):
+def _read_playlist(url, cancelled=lambda: False):
     request = urllib.request.Request(url, headers=VIDEO_HTTP_HEADERS)
     for attempt in range(2):
+        if cancelled():
+            break
         try:
             with urllib.request.urlopen(request, timeout=5) as response:
                 text = response.read(128 * 1024).decode('utf-8-sig', errors='replace')
                 lines = [line.strip() for line in text.splitlines() if line.strip()]
                 return response.geturl(), lines if lines and lines[0] == '#EXTM3U' else []
         except (OSError, HTTPException, ValueError) as error:
-            if attempt or not isinstance(getattr(error, 'reason', error), (TimeoutError, socket.timeout)):
+            if isinstance(error, HTTPError):
+                retryable = error.code in RETRYABLE_HTTP_ERRORS
+                if error.fp is not None:
+                    error.close()
+            else:
+                reason = getattr(error, 'reason', error)
+                retryable = (isinstance(reason, (TimeoutError, socket.timeout, ConnectionError))
+                             or 'timed out' in str(reason).lower())
+            if attempt or not retryable or cancelled():
                 break
+            time.sleep(0.4)
     return url, []
 
 
@@ -69,7 +83,7 @@ def find_resolutions(url, cancelled=lambda: False):
     if not is_hls_url(url) or cancelled():
         return []
 
-    resolved_url, lines = _read_playlist(url)
+    resolved_url, lines = _read_playlist(url, cancelled)
     variants = list(_master_variants(resolved_url, lines))
     options = dict.fromkeys(height for height, _ in variants)
     template = next((variant for _, variant in variants if _path_height(urlsplit(variant).path)),
@@ -85,7 +99,7 @@ def find_resolutions(url, cancelled=lambda: False):
             return height, None
         path = parts.path[:match.start()] + str(height) + parts.path[match.end():]
         candidate = parts._replace(path=path).geturl()
-        target, playlist = _read_playlist(candidate)
+        target, playlist = _read_playlist(candidate, cancelled)
         target_height = _path_height(urlsplit(target).path)
         if _is_media_playlist(playlist) and (target_height is None or int(target_height[1]) == height):
             return height, candidate

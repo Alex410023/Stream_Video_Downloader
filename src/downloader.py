@@ -1,13 +1,64 @@
 import os
 import re
 import shutil
-import tempfile
-import urllib.request
+import signal
 import subprocess
-import yt_dlp
 import sys
+import tempfile
+import threading
+import time
+import urllib.request
+from http.client import HTTPException
+from pathlib import Path
+from urllib.parse import urlsplit
+
+import yt_dlp
+from yt_dlp.utils import format_bytes
 
 from src.config import VIDEO_HTTP_HEADERS
+
+
+class DownloadCancelled(Exception):
+    pass
+
+
+class DownloadControl:
+    def __init__(self):
+        self._condition = threading.Condition()
+        self.paused = False
+        self.cancelled = False
+
+    def set_paused(self, paused):
+        with self._condition:
+            self.paused = paused
+            self._condition.notify_all()
+
+    def cancel(self):
+        with self._condition:
+            self.cancelled = True
+            self._condition.notify_all()
+
+    def checkpoint(self, on_pause=None, on_resume=None):
+        with self._condition:
+            if self.paused and not self.cancelled:
+                if on_pause:
+                    on_pause()
+                self._condition.wait_for(lambda: not self.paused or self.cancelled)
+                if on_resume and not self.cancelled:
+                    on_resume()
+            if self.cancelled:
+                raise DownloadCancelled()
+
+
+class _ControlledYoutubeDL(yt_dlp.YoutubeDL):
+    def __init__(self, options, control):
+        self.control = control
+        super().__init__(options)
+
+    def urlopen(self, request):
+        self.control.checkpoint()
+        return super().urlopen(request)
+
 
 def get_ffmpeg_path():
     app_dir = (sys._MEIPASS if getattr(sys, 'frozen', False)
@@ -19,229 +70,173 @@ def get_ffmpeg_path():
     search_path = os.pathsep.join((os.environ.get('PATH', os.defpath), '/opt/homebrew/bin', '/usr/local/bin'))
     return shutil.which('ffmpeg', path=search_path) or bundled
 
-def download_process(queue, download_dir, on_log, on_progress, on_done, check_cancelled):
-    """
-    Скачивает очередь по прямым ссылкам. Поддерживает скачивание:
-    - Только видео
-    - Только субтитров
-    - Видео + Субтитры (со склейкой)
-    """
+
+def _available_base(directory, name):
+    base = Path(directory, name)
+    candidate = base
+    number = 1
+    while any(Path(f"{candidate}{suffix}").exists() for suffix in (".mp4", ".mkv", ".vtt", ".srt")):
+        candidate = base.with_name(f"{base.name} ({number})")
+        number += 1
+    return candidate
+
+
+def _download_subtitles(url, destination, control):
+    request = urllib.request.Request(url, headers=VIDEO_HTTP_HEADERS)
+    control.checkpoint()
+    with urllib.request.urlopen(request, timeout=15) as response, destination.open('wb') as output:
+        while True:
+            control.checkpoint()
+            chunk = response.read1(64 * 1024)
+            if not chunk:
+                break
+            output.write(chunk)
+
+
+def _download_video(url, path, height, ffmpeg_path, control, on_progress):
+    last_update = 0.0
+
+    def progress_hook(status):
+        nonlocal last_update
+        control.checkpoint()
+        now = time.monotonic()
+        if status['status'] != 'downloading' or now - last_update < 0.15:
+            return
+        current = status.get('downloaded_bytes') or 0
+        total = status.get('total_bytes') or status.get('total_bytes_estimate')
+        if not total:
+            return
+        last_update = now
+        speed = re.sub(r'\x1b\[[0-9;]*m', '', status.get('_speed_str') or '').strip()
+        volume = f"{format_bytes(current)} из {format_bytes(total)}"
+        on_progress(min(100, int(current * 100 / total)), f"{volume} · {speed}" if speed else volume)
+
+    limit = height if height and height != 'best' else 1080
+    options = {
+        'format': f'bestvideo[height<={limit}]+bestaudio/best[height<={limit}]/best',
+        'outtmpl': str(path),
+        'merge_output_format': 'mp4',
+        'concurrent_fragment_downloads': 10,
+        'retries': 10,
+        'socket_timeout': 15,
+        'nocheckcertificate': True,
+        'quiet': True,
+        'noprogress': True,
+        'no_warnings': True,
+        'progress_hooks': [progress_hook],
+        'postprocessor_hooks': [lambda _: control.checkpoint()],
+        'http_headers': VIDEO_HTTP_HEADERS.copy(),
+    }
+    if ffmpeg_path:
+        options['ffmpeg_location'] = ffmpeg_path
+
+    control.checkpoint()
+    with _ControlledYoutubeDL(options, control) as ydl:
+        if ydl.download([url]) or not path.is_file():
+            control.checkpoint()
+            raise RuntimeError("Не удалось сохранить видео")
+
+
+def download_item(item, download_dir, on_log, on_progress, control):
+    video_url = item['video_url']
+    sub_url = item['sub_url']
+    url_path = urlsplit(video_url or sub_url).path
+    name = item['output_name'] or Path(url_path).stem or ('Видео' if video_url else 'Субтитры')
+    control.checkpoint()
     ffmpeg_path = get_ffmpeg_path()
-    had_errors = False
-    for i, item in enumerate(queue):
-        if check_cancelled():
-            break
-
-        video_url = item['video_url']
-        sub_url = item['sub_url']
-        output_name = item['output_name']
-
-        # 1. Определяем базовое имя
-        if not output_name:
-            url_for_name = video_url if video_url else sub_url
-            parsed_name = [p for p in url_for_name.split("/") if p][-1].split("?")[0]
-            if "." not in parsed_name:
-                parsed_name += ".mp4" if video_url else ".vtt"
-            output_base = os.path.splitext(parsed_name)[0]
-        else:
-            output_base = output_name
-
-        orig_output_base = output_base
-        counter = 1
-        base_path = os.path.join(download_dir, output_base)
-        # Проверяем, существует ли уже файл с таким именем (mp4, mkv, vtt или srt)
-        while os.path.exists(f"{base_path}.mp4") or os.path.exists(f"{base_path}.mkv") or os.path.exists(
-                f"{base_path}.vtt") or os.path.exists(f"{base_path}.srt"):
-            output_base = f"{orig_output_base} ({counter})"
-            base_path = os.path.join(download_dir, output_base)
-            counter += 1
-
-        title = output_base
-        on_log("-" * 40)
-        on_log(f"🔄 [{i + 1}/{len(queue)}] Обрабатываю: {title}...")
-
-        base_path = os.path.join(download_dir, output_base)
-        video_path = f"{base_path}.mp4"
-        final_mkv = f"{base_path}.mkv"
-        sub_path = None
-
-        # СЦЕНАРИЙ 1: Скачиваем только субтитры
-        if not video_url and sub_url:
-            on_log("📝 Скачиваю только субтитры (видео не указано)...")
-            ext = ".srt" if ".srt" in sub_url.lower() else ".vtt"
-            sub_path = f"{base_path}{ext}"
+    with tempfile.TemporaryDirectory(prefix='.stream-', dir=download_dir) as temp_dir:
+        directory = Path(temp_dir)
+        video_path = directory / 'video.mp4'
+        sub_extension = '.srt' if '.srt' in sub_url.lower() else '.vtt'
+        sub_path = directory / f'subtitles{sub_extension}'
+        subtitle_failed = False
+        if sub_url:
+            on_log("Скачивание субтитров", "info")
             try:
-                req = urllib.request.Request(sub_url, headers={'User-Agent': 'Mozilla/5.0'})
-                with urllib.request.urlopen(req) as response, open(sub_path, 'wb') as out_file:
-                    out_file.write(response.read())
-                on_log(f"🎉 Готово! Субтитры сохранены: {sub_path}")
-            except Exception as e:
-                had_errors = True
-                on_log(f"❌ Ошибка скачивания субтитров: {e}")
-            on_progress(100)
-            continue
+                _download_subtitles(sub_url, sub_path, control)
+            except (OSError, HTTPException, ValueError) as error:
+                control.checkpoint()
+                if not video_url:
+                    raise
+                subtitle_failed = True
+                on_log(f"Субтитры недоступны: {error}", "warning")
 
-        # СЦЕНАРИЙ 2 и 3: Скачивание видео (с субтитрами или без)
-        if sub_url and sub_url.strip():
-            on_log("📝 Скачиваю субтитры...")
-            ext = ".srt" if ".srt" in sub_url.lower() else ".vtt"
-            sub_path = f"{base_path}{ext}"
+        if video_url:
+            on_log("Скачивание видео", "info")
+            _download_video(video_url, video_path, item.get('selected_height'), ffmpeg_path, control, on_progress)
+
+        control.checkpoint()
+        output_base = _available_base(download_dir, name)
+        if video_url and sub_url and not subtitle_failed:
+            output = Path(f"{output_base}.mkv")
+            on_log("Объединение видео и субтитров", "info")
             try:
-                req = urllib.request.Request(sub_url, headers={'User-Agent': 'Mozilla/5.0'})
-                with urllib.request.urlopen(req) as response, open(sub_path, 'wb') as out_file:
-                    out_file.write(response.read())
-                on_log("✅ Субтитры скачаны.")
-            except Exception as e:
-                had_errors = True
-                on_log(f"⚠️ Не удалось скачать субтитры: {e}")
-                sub_path = None
-
-        if check_cancelled():
-            _cleanup(video_path, sub_path)
-            break
-
-        # Скачивание видео фрагментов через yt-dlp
-        on_log(f"🎥 Загружаю видео фрагменты...")
-
-        def progress_hook(d):
-            if check_cancelled():
-                raise Exception("CANCELLED_BY_USER")
-            if d['status'] == 'downloading':
-                percent_str = d.get('_percent_str', '0%')
-                clean_percent = re.sub(r'\x1b\[[0-9;]*m', '', percent_str).replace('%', '').strip()
-
-                speed = d.get('_speed_str', '0 B/s').strip()
-                downloaded = d.get('_downloaded_bytes_str', '0 B').strip()
-
-                # Пробуем получить общий размер от yt-dlp
-                total = d.get('_total_bytes_str') or d.get('_total_bytes_estimate_str')
-
-                # --- РЕШЕНИЕ: Если размер N/A, рассчитываем его математически ---
-                if not total:
-                    try:
-                        pct = float(clean_percent)
-                        downloaded_bytes = d.get('downloaded_bytes')
-                        if pct > 0 and downloaded_bytes:
-                            # Рассчитываем примерный итоговый вес файла
-                            estimated_total_bytes = downloaded_bytes / (pct / 100.0)
-
-                            # Красиво форматируем байты в человекочитаемый вид (KiB, MiB, GiB)
-                            def format_bytes(b):
-                                for unit in ['B', 'KiB', 'MiB', 'GiB', 'TiB']:
-                                    if b < 1024.0:
-                                        return f"{b:.2f}{unit}"
-                                    b /= 1024.0
-                                return f"{b:.2f}PiB"
-
-                            total = format_bytes(estimated_total_bytes)
-                    except Exception:
-                        pass
-
-                # Дефолтный фоллбек, если расчет не удался
-                if not total:
-                    total = 'N/A'
-                else:
-                    total = total.strip()
-
-                status_text = f"Скачано: {downloaded} из {total} ({percent_str.strip()}) | Скорость: {speed}"
-
-                try:
-                    val = int(float(clean_percent))
-                    on_progress(val, status_text)
-                except ValueError:
-                    pass
-
-
-        # Читаем выбранное пользователем качество (если его нет, по умолчанию берем 'best')
-        selected_height = item.get('selected_height', 'best')
-
-        # Динамически настраиваем формат скачивания под выбранное разрешение
-        if selected_height and selected_height != 'best':
-            video_format = f'bestvideo[height<={selected_height}]+bestaudio/best[height<={selected_height}]/best'
+                _merge_subtitles(ffmpeg_path, video_path, sub_path, output, item.get('subtitle_offset', 0), control)
+            except (OSError, subprocess.CalledProcessError) as error:
+                control.checkpoint()
+                detail = (getattr(error, 'stderr', None) or str(error)).strip()
+                on_log(f"Ошибка склейки: {detail}. Видео и субтитры сохранены отдельно.", "error")
+                video_path.replace(f"{output_base}.mp4")
+                sub_path.replace(f"{output_base}{sub_extension}")
+                return False
+        elif video_url:
+            output = Path(f"{output_base}.mp4")
+            video_path.replace(output)
         else:
-            video_format = 'bestvideo[height<=1080]+bestaudio/best[height<=1080]/best'
+            output = Path(f"{output_base}{sub_extension}")
+            sub_path.replace(output)
 
-        ydl_opts = {
-            'format': video_format,  # <-- Сюда подставляется наш динамический формат
-            'outtmpl': video_path,
-            'merge_output_format': 'mp4',
-            'concurrent_fragment_downloads': 10,
-            'retries': 10,
-            'nocheckcertificate': True,
-            'quiet': True,
-            'no_warnings': True,
-            'progress_hooks': [progress_hook],
-            'http_headers': VIDEO_HTTP_HEADERS.copy(),
-        }
-        if ffmpeg_path:
-            ydl_opts['ffmpeg_location'] = ffmpeg_path
-
-        try:
-            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                if ydl.download([video_url]) or not os.path.isfile(video_path):
-                    raise RuntimeError(f"Не удалось сохранить видео в {video_path}")
-            on_log("✅ Видео скачано!")
-        except Exception as e:
-            if "CANCELLED_BY_USER" in str(e):
-                on_log("🛑 Процесс загрузки остановлен.")
-                _cleanup(video_path, sub_path)
-            else:
-                had_errors = True
-                on_log(f"❌ Ошибка загрузки видео: {e}")
-            continue
-
-        if check_cancelled():
-            _cleanup(video_path, sub_path)
-            break
-
-        # Сборка через FFmpeg (если есть и видео, и субтитры)
-        if sub_path:
-            on_log("🔗 Склеиваю видео и субтитры в .mkv...")
-            try:
-                _merge_subtitles(ffmpeg_path, video_path, sub_path, final_mkv)
-                on_log(f"🎉 Готово! Файл сохранен: {final_mkv}")
-                _cleanup(video_path, sub_path)
-            except (OSError, subprocess.CalledProcessError) as e:
-                had_errors = True
-                details = (getattr(e, 'stderr', None) or str(e)).strip()
-                on_log(f"❌ Ошибка склейки: {details}\nВидео и субтитры сохранены раздельно.")
-        else:
-            on_log(f"🎉 Готово! Видео сохранено: {video_path}")
-
-    if check_cancelled():
-        on_log("🛑 Скачивание всей очереди было прервано.")
-    elif had_errors:
-        on_log("⚠️ Очередь завершена с ошибками.")
-    else:
-        on_log("🎉 Загрузка всей очереди успешно завершена!")
-    on_progress(100)
-    on_done()
+        on_progress(100, "")
+        on_log(f"Сохранено: {output.name}", "success")
+        return not subtitle_failed
 
 
-def _merge_subtitles(ffmpeg_path, video_path, sub_path, final_mkv):
+def _merge_subtitles(ffmpeg_path, video_path, sub_path, final_mkv, offset=0, control=None):
     if not ffmpeg_path:
         raise FileNotFoundError("FFmpeg не найден")
+    if control is None:
+        control = DownloadControl()
 
-    with tempfile.TemporaryDirectory(dir=os.path.dirname(final_mkv)) as temp_dir:
-        temp_mkv = os.path.join(temp_dir, 'output.mkv')
-        subprocess.run([
-            ffmpeg_path, '-nostdin', '-hide_banner', '-loglevel', 'error',
+    with tempfile.TemporaryDirectory(dir=Path(video_path).parent) as temp_dir:
+        temp_dir = Path(temp_dir)
+        temp_output = temp_dir / 'output.mkv'
+        ffmpeg = [ffmpeg_path, '-nostdin', '-hide_banner', '-loglevel', 'error']
+        if offset < 0:
+            # Trim the subtitle stream separately so FFmpeg keeps the video and audio timestamps.
+            shifted = temp_dir / 'shifted.srt'
+            _run_ffmpeg([
+                *ffmpeg, '-itsoffset', str(offset), '-i', str(sub_path), '-ss', '0',
+                '-map', '0:s:0', '-c:s', 'subrip', str(shifted),
+            ], control)
+            sub_path = shifted
+            offset = 0
+        _run_ffmpeg([
+            *ffmpeg,
             '-abort_on', 'empty_output_stream',
-            '-i', video_path, '-i', sub_path,
+            '-i', str(video_path), '-itsoffset', str(offset), '-i', str(sub_path),
             '-map', '0:v', '-map', '0:a?', '-map', '1:s:0',
-            '-c', 'copy', '-c:s', 'subrip', temp_mkv,
-        ], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True, errors='replace')
-        os.replace(temp_mkv, final_mkv)
+            '-c', 'copy', '-c:s', 'subrip', '-avoid_negative_ts', 'disabled', str(temp_output),
+        ], control)
+        control.checkpoint()
+        temp_output.replace(final_mkv)
 
 
-def _cleanup(video_path, sub_path):
-    if video_path and os.path.exists(video_path):
+def _run_ffmpeg(command, control):
+    control.checkpoint()
+    with subprocess.Popen(command, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
+                          text=True, errors='replace') as process:
         try:
-            os.remove(video_path)
-        except:
-            pass
-    if sub_path and os.path.exists(sub_path):
-        try:
-            os.remove(sub_path)
-        except:
-            pass
+            while True:
+                control.checkpoint(lambda: process.send_signal(signal.SIGSTOP),
+                                   lambda: process.send_signal(signal.SIGCONT))
+                try:
+                    _, stderr = process.communicate(timeout=0.2)
+                    break
+                except subprocess.TimeoutExpired:
+                    continue
+        except DownloadCancelled:
+            process.kill()
+            process.communicate()
+            raise
+        if process.returncode:
+            raise subprocess.CalledProcessError(process.returncode, command, stderr=stderr)
