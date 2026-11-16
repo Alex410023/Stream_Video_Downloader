@@ -10,6 +10,6 @@ VIDEO_HTTP_HEADERS = {
 }
 
 # Настройки обновления (для связи с GitHub)
-CURRENT_VERSION = "v1.1.3"
+CURRENT_VERSION = "v1.2.0"
 GITHUB_OWNER = "Alex410023"
 GITHUB_REPO = "Stream_Video_Downloader"

@@ -1,9 +1,13 @@
 import os
 import sys
 import json
+import socket
 import urllib.request
 import tempfile
 import subprocess
+from http.client import HTTPException
+from urllib.error import HTTPError, URLError
+
 from PyQt6.QtCore import QThread, pyqtSignal
 
 
@@ -20,24 +24,34 @@ class UpdateChecker(QThread):
     def run(self):
         try:
             req = urllib.request.Request(self.api_url, headers={'User-Agent': 'StreamVideoDownloader-App'})
-            with urllib.request.urlopen(req, timeout=5) as response:
-                data = json.loads(response.read().decode())
-                latest_version = data.get('tag_name')
-                changelog = data.get('body', 'Нет описания')
+            for attempt in range(2):
+                try:
+                    with urllib.request.urlopen(req, timeout=10) as response:
+                        data = json.load(response)
+                    break
+                except HTTPError:
+                    raise
+                except (TimeoutError, socket.timeout, URLError) as error:
+                    reason = getattr(error, 'reason', error)
+                    if not isinstance(reason, (TimeoutError, socket.timeout)) and 'timed out' not in str(reason).lower():
+                        raise
+                    if attempt == 1:
+                        self.error.emit("GitHub не ответил вовремя. Попробуйте проверить обновления позже.")
+                        return
 
-                # Если версия на гитхабе отличается от нашей
-                if latest_version and latest_version != self.current_version:
-                    download_url = None
-                    # Ищем прикрепленный .zip файл в релизе
-                    for asset in data.get('assets', []):
-                        if asset['name'].endswith('.zip'):
-                            download_url = asset['browser_download_url']
-                            break
-
-                    if download_url:
-                        self.update_available.emit(latest_version, changelog, download_url)
-        except Exception as e:
-            self.error.emit(f"Ошибка проверки обновлений: {e}")
+            latest_version = data.get('tag_name')
+            if latest_version and latest_version != self.current_version:
+                changelog = data.get('body') or 'Нет описания'
+                for asset in data.get('assets', []):
+                    if asset['name'].endswith('.zip'):
+                        self.update_available.emit(latest_version, changelog, asset['browser_download_url'])
+                        break
+        except HTTPError as error:
+            self.error.emit(f"GitHub вернул ошибку HTTP {error.code}. Попробуйте позже.")
+        except (OSError, HTTPException):
+            self.error.emit("Не удалось связаться с GitHub. Проверьте подключение к интернету.")
+        except (ValueError, TypeError, KeyError, AttributeError):
+            self.error.emit("Не удалось прочитать ответ GitHub. Попробуйте позже.")
 
 
 class UpdateDownloader(QThread):

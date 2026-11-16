@@ -1,23 +1,23 @@
 import os
-from PyQt6.QtWidgets import (QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
-                             QLineEdit, QPushButton, QTextEdit, QScrollArea,
+import sys
+
+from PyQt6.QtWidgets import (QApplication, QButtonGroup, QMainWindow, QWidget, QVBoxLayout,
+                             QHBoxLayout, QLineEdit, QPushButton, QScrollArea,
                              QProgressBar, QLabel, QTabWidget, QFrame, QSplitter,
-                             QMessageBox, QProgressDialog, QFileDialog, QTextBrowser)
-from PyQt6.QtCore import Qt, QObject, pyqtSignal
-from PyQt6.QtGui import QFont
+                             QMessageBox, QProgressDialog, QFileDialog, QSizePolicy,
+                             QToolButton)
+from PyQt6.QtCore import Qt, QObject, QSettings, QSize, QTimer, QUrl, pyqtSignal
+from PyQt6.QtGui import QFontDatabase, QPalette
 
 from src.config import DEFAULT_DOWNLOAD_DIR, CURRENT_VERSION, GITHUB_OWNER, GITHUB_REPO
 from src.updater import UpdateChecker, UpdateDownloader, apply_update_and_restart
 from src.logic import DownloaderLogic
-from src.gui_widgets import MovieRowWidget, EpisodeRowWidget
+from src.gui_widgets import ActivityLog, EpisodeRowWidget, GuideBrowser, MovieRowWidget
+from src.ui_style import DARK, GUIDE_STYLE, LIGHT, STYLE, appearance_preview, symbol
 
 
 def get_asset_path(filename, as_url=True):
     """Возвращает путь к файлу картинки (as_url=True для HTML, as_url=False для системы)."""
-    import sys
-    import os
-    from PyQt6.QtCore import QUrl
-
     if getattr(sys, 'frozen', False):
         path = os.path.join(sys._MEIPASS, 'assets', filename)
     else:
@@ -28,49 +28,19 @@ def get_asset_path(filename, as_url=True):
     return path
 
 class GUISignals(QObject):
-    log_signal = pyqtSignal(str)
+    log_signal = pyqtSignal(str, str)
     progress_signal = pyqtSignal(int, str)
-    done_signal = pyqtSignal()
+    done_signal = pyqtSignal(str)
 
 
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("Stream Video Downloader (β)")
-        self.resize(850, 750)
-
-        # Интерактивная таблица стилей с поддержкой hover/pressed эффектов
-        self.setStyleSheet("""
-            QMainWindow, QWidget { background-color: #1e1e1e; color: #ffffff; font-family: Arial; }
-            QLineEdit, QSpinBox { background-color: #2d2d2d; border: 1px solid #3d3d3d; padding: 10px; border-radius: 4px; color: white; }
-            QTabWidget::pane { border: 1px solid #3d3d3d; background-color: #202020; border-radius: 4px; }
-            QTabBar::tab { background: #2d2d2d; padding: 10px 25px; margin-right: 2px; border-top-left-radius: 4px; border-top-right-radius: 4px; }
-            QTabBar::tab:selected { background: #202020; border-bottom: 2px solid #0078d7; font-weight: bold; }
-            QScrollArea { border: none; background-color: transparent; }
-            QSplitter::handle { background-color: #3d3d3d; height: 6px; border-radius: 3px; }
-            QSplitter::handle:hover { background-color: #0078d7; }
-
-            /* Базовый стиль кнопок */
-            QPushButton { color: white; border: none; padding: 10px; border-radius: 4px; font-weight: bold; background-color: #2d2d2d; border: 1px solid #3d3d3d;}
-            QPushButton:hover { background-color: #3d3d3d; border-color: #4d4d4d; }
-            QPushButton:pressed { background-color: #1e1e1e; }
-            QPushButton:disabled { background-color: #444444; color: #888888; border-color: #444444; }
-
-            /* Синие кнопки управления (Добавление серий/фильмов) */
-            QPushButton#blueBtn { background-color: #0078d7; border: none; }
-            QPushButton#blueBtn:hover { background-color: #005a9e; }
-            QPushButton#blueBtn:pressed { background-color: #004578; }
-
-            /* Зеленая кнопка Запуска скачивания */
-            QPushButton#greenBtn { background-color: #107c10; border: none; }
-            QPushButton#greenBtn:hover { background-color: #0d630d; }
-            QPushButton#greenBtn:pressed { background-color: #084008; }
-
-            /* Красные кнопки удаления/отмены */
-            QPushButton#redBtn { background-color: #d83b01; border: none; }
-            QPushButton#redBtn:hover { background-color: #b52e01; }
-            QPushButton#redBtn:pressed { background-color: #8c2000; }
-        """)
+        self.setWindowTitle("Stream Video Downloader")
+        self.setFont(QFontDatabase.systemFont(QFontDatabase.SystemFont.GeneralFont))
+        self.resize(1000, 720)
+        self.setMinimumSize(800, 570)
+        self.setUnifiedTitleAndToolBarOnMac(True)
 
         self.signals = GUISignals()
         self.signals.log_signal.connect(self.append_log)
@@ -78,100 +48,66 @@ class MainWindow(QMainWindow):
         self.signals.done_signal.connect(self.handle_download_done)
 
         self.logic = DownloaderLogic(
-            on_log=lambda msg: self.signals.log_signal.emit(msg),
+            on_log=self.signals.log_signal.emit,
             on_progress=lambda percent, text="": self.signals.progress_signal.emit(percent, text),
-            on_done=lambda: self.signals.done_signal.emit()
+            on_done=self.signals.done_signal.emit
         )
 
         self.movie_rows = []
         self.episode_rows = []
+        self.queue_rows = None
+        self.pending_rows = []
+        self.active_row = None
+        self.close_after_queue = False
+        self.settings = QSettings(GITHUB_OWNER, "StreamVideoDownloader")
 
         self.init_ui()
+        self.change_appearance()
+        QApplication.styleHints().colorSchemeChanged.connect(self.apply_appearance)
         self.check_for_updates()
 
+    def closeEvent(self, event):
+        if self.queue_rows is None:
+            super().closeEvent(event)
+            return
+        event.ignore()
+        self.close_after_queue = True
+        if not self.logic.control.cancelled:
+            self.on_cancel_clicked()
+
     def init_ui(self):
-        central_widget = QWidget()
+        central_widget = QWidget(objectName="AppSurface")
         self.setCentralWidget(central_widget)
-        main_layout = QVBoxLayout(central_widget)
-        main_layout.setContentsMargins(10, 10, 10, 10)
-        main_layout.setSpacing(10)
+        root = QHBoxLayout(central_widget)
+        root.setContentsMargins(0, 6, 6, 6)
+        root.setSpacing(0)
+        root.addWidget(self.build_navigation())
 
-        # Создаем вертикальный разделитель (QSplitter)
+        workspace = QFrame(objectName="Workspace")
+        root.addWidget(workspace, 1)
+        workspace_layout = QVBoxLayout(workspace)
+        workspace_layout.setContentsMargins(24, 20, 24, 20)
         self.splitter = QSplitter(Qt.Orientation.Vertical)
-        main_layout.addWidget(self.splitter)
-
-        # ================= ВЕРХНИЙ БЛОК (ТОЛЬКО ВКЛАДКИ) =================
-        self.top_container = QWidget()
-        top_layout = QVBoxLayout(self.top_container)
-        top_layout.setContentsMargins(0, 0, 0, 0)
-        top_layout.setSpacing(10)
+        self.splitter.setChildrenCollapsible(False)
+        workspace_layout.addWidget(self.splitter)
 
         self.tabs = QTabWidget()
-        top_layout.addWidget(self.tabs)
+        self.tabs.tabBar().hide()
+        self.splitter.addWidget(self.tabs)
+        self.splitter.setStretchFactor(0, 1)
 
-        # Вкладка 1: Фильмы
-        self.tab_movie = QWidget()
-        movie_tab_layout = QVBoxLayout(self.tab_movie)
-        movie_tab_layout.setSpacing(10)
-        movie_tab_layout.setContentsMargins(10, 10, 10, 10)
+        self.add_movie_btn, self.scroll_area_movie_layout = self.add_download_page(
+            "Фильмы", "Добавить фильм", self.add_movie_row)
+        self.add_ep_btn, self.scroll_area_series_layout = self.add_download_page(
+            "Сериалы", "Добавить серию", self.add_episode_row)
 
-        self.add_movie_btn = QPushButton("➕ Добавить еще один фильм")
-        self.add_movie_btn.setObjectName("blueBtn")
-        self.add_movie_btn.clicked.connect(self.add_movie_row)
-        movie_tab_layout.addWidget(self.add_movie_btn, alignment=Qt.AlignmentFlag.AlignLeft)
-
-        self.scroll_area_movie = QScrollArea()
-        self.scroll_area_movie.setWidgetResizable(True)
-        self.scroll_area_movie_content = QWidget()
-        self.scroll_area_movie_layout = QVBoxLayout(self.scroll_area_movie_content)
-        self.scroll_area_movie_layout.setSpacing(10)
-        self.scroll_area_movie_layout.setAlignment(Qt.AlignmentFlag.AlignTop)
-        self.scroll_area_movie.setWidget(self.scroll_area_movie_content)
-        movie_tab_layout.addWidget(self.scroll_area_movie)
-
-        self.tabs.addTab(self.tab_movie, "🎬 Скачивание фильма")
-
-        # Вкладка 2: Сериалы
-        self.tab_series = QWidget()
-        series_tab_layout = QVBoxLayout(self.tab_series)
-        series_tab_layout.setSpacing(10)
-        series_tab_layout.setContentsMargins(10, 10, 10, 10)
-
-        self.add_ep_btn = QPushButton("➕ Добавить еще одну серию")
-        self.add_ep_btn.setObjectName("blueBtn")
-        self.add_ep_btn.clicked.connect(self.add_episode_row)
-        series_tab_layout.addWidget(self.add_ep_btn, alignment=Qt.AlignmentFlag.AlignLeft)
-
-        self.scroll_area_series = QScrollArea()
-        self.scroll_area_series.setWidgetResizable(True)
-        self.scroll_area_series_content = QWidget()
-        self.scroll_area_series_layout = QVBoxLayout(self.scroll_area_series_content)
-        self.scroll_area_series_layout.setSpacing(10)
-        self.scroll_area_series_layout.setAlignment(Qt.AlignmentFlag.AlignTop)
-        self.scroll_area_series.setWidget(self.scroll_area_series_content)
-        series_tab_layout.addWidget(self.scroll_area_series)
-
-        self.tabs.addTab(self.tab_series, "📺 Скачивание серии сериала")
-
-        # ================= Вкладка 3: Инструкция =================
         self.tab_instructions = QWidget()
         inst_main_layout = QVBoxLayout(self.tab_instructions)
-        inst_main_layout.setContentsMargins(10, 10, 10, 10)
-
-        # Используем QTextBrowser вместо QLabel + QScrollArea.
-        # Он идеально поддерживает прокрутку, выделение, копирование (в т.ч. через правую кнопку мыши) и клики по картинкам.
-        self.inst_browser = QTextBrowser()
+        inst_main_layout.setContentsMargins(0, 0, 0, 0)
+        self.inst_browser = GuideBrowser()
         self.inst_browser.setOpenExternalLinks(False)
         self.inst_browser.setOpenLinks(False)
-        self.inst_browser.setReadOnly(True)
-        self.inst_browser.setStyleSheet("""
-                    QTextBrowser {
-                        border: none;
-                        background-color: transparent;
-                        font-size: 13px;
-                        color: #dddddd;
-                    }
-                """)
+        self.inst_browser.document().setDocumentMargin(20)
 
         # Получаем пути к скриншотам
         safari_img = get_asset_path("safari_dev.png", as_url=True)
@@ -180,229 +116,397 @@ class MainWindow(QMainWindow):
         sub_example_img = get_asset_path("sub_example.png", as_url=True)
 
         inst_html = (
-            "<h2>📖 Как пользоваться программой</h2><br>"
-            "<h3>🍏 Важно для пользователей браузера Safari</h3>"
-            "Если вы пользуетесь браузером Safari, панель разработчика по умолчанию скрыта. Чтобы её включить:<br>"
-            "1. Откройте меню <b>Safari -> Настройки</b> (или нажмите сочетание клавиш <code style='background-color: #3d3d3d; color: #ffffff; padding: 2px 6px; border-radius: 4px; font-family: monospace;'>Cmd + ,</code>).<br>"
-            "2. Перейдите во вкладку <b>Дополнения</b> (Advanced).<br>"
-            "3. В самом низу поставьте галочку <b>«Показывать функции для веб-разработчиков»</b> (или <i>«Показывать меню Разработка в строке меню»</i>).<br>"
-            f"<br><a href='safari_dev.png'><img src='{safari_img}' width='600'></a><br><br>"
-            "После этого открыть консоль разработчика можно будет сочетанием клавиш <code style='background-color: #3d3d3d; color: #ffffff; padding: 2px 6px; border-radius: 4px; font-family: monospace;'>Option + Cmd + I</code>.<br><br>"
+            "<h2>Как пользоваться программой</h2>"
+            "<h3>Настройки Safari</h3>"
+            "<p>Если вы пользуетесь браузером Safari, панель разработчика по умолчанию скрыта. Чтобы её включить:</p>"
+            "<p class='guide-item'>1. Откройте меню <b>Safari -> Настройки</b> (или нажмите сочетание клавиш <code>Cmd + ,</code>).</p>"
+            "<p class='guide-item'>2. Перейдите во вкладку <b>Дополнения</b> (Advanced).</p>"
+            "<p class='guide-item'>3. В самом низу поставьте галочку <b>«Показывать функции для веб-разработчиков»</b> (или <i>«Показывать меню Разработка в строке меню»</i>).</p>"
+            f"<p class='guide-image'><a href='safari_dev.png'><img src='{safari_img}' width='480'></a></p>"
+            "<p>После этого открыть консоль разработчика можно будет сочетанием клавиш <code>Option + Cmd + I</code>.</p>"
 
-            "<h3>Шаг 1. Откройте нужный сайт в браузере</h3>"
-            "Зайдите на сайт с фильмом или сериалом и перейдите на страницу с видеоплеером.<br><br>"
+            "<h3 class='guide-step'>Шаг 1. Откройте нужный сайт в браузере</h3>"
+            "<p>Зайдите на сайт с фильмом или сериалом и перейдите на страницу с видеоплеером.</p>"
 
-            "<h3>Шаг 2. Откройте панель разработчика (DevTools)</h3>"
-            "Нажмите сочетание клавиш на клавиатуре:<br>"
-            "• На Mac: <code style='background-color: #3d3d3d; color: #ffffff; padding: 3px 6px; border-radius: 4px; font-family: monospace;'>Option + Cmd + I</code><br>"
-            "• На Windows/Linux: <code style='background-color: #3d3d3d; color: #ffffff; padding: 3px 6px; border-radius: 4px; font-family: monospace;'>F12</code> или <code style='background-color: #3d3d3d; color: #ffffff; padding: 3px 6px; border-radius: 4px; font-family: monospace;'>Ctrl + Shift + I</code><br><br>"
+            "<h3 class='guide-step'>Шаг 2. Откройте панель разработчика (DevTools)</h3>"
+            "<p>Нажмите сочетание клавиш на клавиатуре:</p>"
+            "<p class='guide-item'>• На Mac: <code>Option + Cmd + I</code></p>"
+            "<p class='guide-item'>• На Windows/Linux: <code>F12</code> или <code>Ctrl + Shift + I</code></p>"
 
-            "<h3>Шаг 3. Перейдите во вкладку Network (Сеть) и настройте фильтр</h3>"
-            "В открывшейся панели выберите вкладку <b>Network</b> (Сеть).<br>"
-            "Чтобы не путаться в тысячах запросов, воспользуйтесь полем фильтра поиска (<b>Filter</b>) в верхнем левом углу панели разработчика:<br>"
-            f"<br><a href='filter_devtools.png'><img src='{filter_img}' width='600'></a><br><br>"
-            "Введите в это поле фразу поиска: <code style='background-color: #3d3d3d; color: #ffffff; padding: 2px 4px; border-radius: 3px;'>.m3u8</code>.<br>"
-            "<i>(Сделайте это строго до запуска видео, чтобы браузер не пропустил самый первый, самый важный запрос плеера. Если вы открыли вкладку Network позже и файлы не появились — просто обновите страницу кнопкой в браузере или сочетанием клавиш <code style='background-color: #3d3d3d; color: #ffffff; padding: 2px 4px; border-radius: 3px;'>Cmd+R</code> / <code style='background-color: #3d3d3d; color: #ffffff; padding: 2px 4px; border-radius: 3px;'>Ctrl+F5</code>).</i><br><br>"
+            "<h3 class='guide-step'>Шаг 3. Перейдите во вкладку Network (Сеть) и настройте фильтр</h3>"
+            "<p>В открывшейся панели выберите вкладку <b>Network</b> (Сеть).</p>"
+            "<p>Чтобы не путаться в тысячах запросов, воспользуйтесь полем фильтра поиска (<b>Filter</b>) в верхнем левом углу панели разработчика:</p>"
+            f"<p class='guide-image'><a href='filter_devtools.png'><img src='{filter_img}' width='480'></a></p>"
+            "<p>Введите в это поле фразу поиска: <code>.m3u8</code>.</p>"
+            "<table class='guide-note' width='100%' cellspacing='0' cellpadding='13'><tr><td><p><i>(Сделайте это строго до запуска видео, чтобы браузер не пропустил самый первый, самый важный запрос плеера. Если вы открыли вкладку Network позже и файлы не появились — просто обновите страницу кнопкой в браузере или сочетанием клавиш <code>Cmd+R</code> / <code>Ctrl+F5</code>).</i></p></td></tr></table>"
 
-            "<h3>Шаг 4. Запустите воспроизведение видео</h3>"
-            "Включите плеер на сайте. Браузер сразу начнет запрашивать у сервера плейлисты видеопотоков, и в вашем списке Network начнут появляться ссылки.<br><br>"
+            "<h3 class='guide-step'>Шаг 4. Запустите воспроизведение видео</h3>"
+            "<p>Включите плеер на сайте. Браузер сразу начнет запрашивать у сервера плейлисты видеопотоков, и в вашем списке Network начнут появляться ссылки.</p>"
 
-            "<h3>Шаг 5. Найдите ссылки на видео</h3>"
-            "В отфильтрованном списке Network вы увидите один или несколько файлов с расширением <code style='background-color: #3d3d3d; color: #ffffff; padding: 2px 4px; border-radius: 3px;'>.m3u8</code>.<br><br>"
+            "<h3 class='guide-step'>Шаг 5. Найдите ссылки на видео</h3>"
+            "<p>В отфильтрованном списке Network вы увидите один или несколько файлов с расширением <code>.m3u8</code>.</p>"
 
             "<h3>💡 Как определить, какая именно ссылка вам нужна?</h3>"
-            "Сайты могут отправлять множество запросов, но нам нужен главный файл — <b>Мастер-плейлист</b>. Определить его можно по следующим характерным признакам:<br>"
-            "1. <b>Самый первый по времени:</b> Нужный плейлист всегда загружается в первую же секунду при открытии плеера (он окажется на самом верху списка).<br>"
-            "2. <b>Ориентируйтесь по типу данных:</b> В любом браузере (Chrome, Safari, Firefox) эти файлы обычно классифицируются как <b>XHR</b>, <b>Fetch</b>, <b>Document</b> или просто <b>Другое (Other)</b>.<br>"
-            "3. <b>Файл, в предпросмотре которого описаны несколько разрешений:</b> Кликните по файлу в списке и откройте вкладку <b>Preview</b> (Предпросмотр) или <b>Response</b> (Ответ) на панели справа. В нём должны быть описаны разрешения по типу 480p, 720p, 1080p:<br><br>"
-            
-            "• <b>Важно:</b> Если нужный файл субтитров или видео долгое время не появляется в списке — просто перезагрузите страницу сайта кнопкой в браузере или нажмите сочетание клавиш <code style='background-color: #3d3d3d; color: #ffffff; padding: 2px 4px; border-radius: 3px;'>Cmd+R</code> (или <code style='background-color: #3d3d3d; color: #ffffff; padding: 2px 4px; border-radius: 3px;'>Ctrl+F5</code> на Windows), чтобы плеер отправил запросы заново.<br><br>"
+            "<p>Сайты могут отправлять множество запросов, но нам нужен главный файл — <b>Мастер-плейлист</b>. Определить его можно по следующим характерным признакам:</p>"
+            "<p class='guide-item'>1. <b>Самый первый по времени:</b> Нужный плейлист всегда загружается в первую же секунду при открытии плеера (он окажется на самом верху списка).</p>"
+            "<p class='guide-item'>2. <b>Ориентируйтесь по типу данных:</b> В любом браузере (Chrome, Safari, Firefox) эти файлы обычно классифицируются как <b>XHR</b>, <b>Fetch</b>, <b>Document</b> или просто <b>Другое (Other)</b>.</p>"
+            "<p class='guide-item'>3. <b>Файл, в предпросмотре которого описаны несколько разрешений:</b> Кликните по файлу в списке и откройте вкладку <b>Preview</b> (Предпросмотр) или <b>Response</b> (Ответ) на панели справа. В нём должны быть описаны разрешения по типу 480p, 720p, 1080p:</p>"
 
-            
-            f"<br><a href='master_example.png'><img src='{master_img}' width='600'></a><br><br>"
-            "<b>Пример структуры мастер-файла в предпросмотре:</b><br>"
-            "<pre style='background-color: #252525; padding: 10px; border-radius: 5px; font-family: monospace; font-size: 11px; color: #0078d7;'>"
+            "<table class='guide-note' width='100%' cellspacing='0' cellpadding='13'><tr><td><p>• <b>Важно:</b> Если нужный файл субтитров или видео долгое время не появляется в списке — просто перезагрузите страницу сайта кнопкой в браузере или нажмите сочетание клавиш <code>Cmd+R</code> (или <code>Ctrl+F5</code> на Windows), чтобы плеер отправил запросы заново.</p></td></tr></table>"
+
+            f"<p class='guide-image'><a href='master_example.png'><img src='{master_img}' width='480'></a></p>"
+            "<p><b>Пример структуры мастер-файла в предпросмотре:</b></p>"
+            "<table class='guide-example' width='100%' cellspacing='0' cellpadding='13'><tr><td><pre>"
             "#EXTM3U\n"
             "#EXT-X-STREAM-INF:BANDWIDTH=2892000,RESOLUTION=1280x720\n"
             "./720.mp4:hls:manifest.m3u8\n"
             "#EXT-X-STREAM-INF:BANDWIDTH=5592000,RESOLUTION=1920x1080\n"
             "./1080.mp4:hls:manifest.m3u8"
-            "</pre><br>"
-            "Если вы нашли такой файл, скопируйте на него ссылку: кликните правой кнопкой мыши -> <b>Copy -> Copy link address</b>.<br><br>"
+            "</pre></td></tr></table>"
+            "<p>Если вы нашли такой файл, скопируйте на него ссылку: кликните правой кнопкой мыши -> <b>Copy -> Copy link address</b>.</p>"
 
             "<h3>ℹ️ Замечание: Как скачать другую озвучку или субтитры?</h3>"
-            "Обычно плеер сразу подгружает видеофайл и файлы субтитров по умолчанию. Если вам нужна оригинальная звуковая дорожка или другие субтитры (например, английские):<br>"
-            "1. Измените настройки языка, озвучки или субтитров в самом плеере на сайте.<br>"
-            "2. В этот момент в список Network сразу же подгрузится новый файл плейлиста. Скопируйте ссылку на него (для поиска субтитров можно настроить фильтр на <code style='background-color: #3d3d3d; color: #ffffff; padding: 2px 4px; border-radius: 3px;'>.vtt</code> или <code style='background-color: #3d3d3d; color: #ffffff; padding: 2px 4px; border-radius: 3px;'>.srt</code>).<br><br>"
-            "• Чтобы проверить, правильный ли это файл субтитров, откройте вкладку <b>Preview</b> (Предпросмотр). Текст внутри должен выглядеть осмысленно — содержать временные метки (таймкоды) и реплики диалогов, как показано на скриншоте ниже:<br>"
-            f"<br><a href='sub_example.png'><img src='{sub_example_img}' width='600'></a><br><br>"
+            "<p>Обычно плеер сразу подгружает видеофайл и файлы субтитров по умолчанию. Если вам нужна оригинальная звуковая дорожка или другие субтитры (например, английские):</p>"
+            "<p class='guide-item'>1. Измените настройки языка, озвучки или субтитров в самом плеере на сайте.</p>"
+            "<p class='guide-item'>2. В этот момент в список Network сразу же подгрузится новый файл плейлиста. Скопируйте ссылку на него (для поиска субтитров можно настроить фильтр на <code>.vtt</code> или <code>.srt</code>).</p>"
+            "<p class='guide-item'>• Чтобы проверить, правильный ли это файл субтитров, откройте вкладку <b>Preview</b> (Предпросмотр). Текст внутри должен выглядеть осмысленно — содержать временные метки (таймкоды) и реплики диалогов, как показано на скриншоте ниже:</p>"
+            f"<p class='guide-image'><a href='sub_example.png'><img src='{sub_example_img}' width='480'></a></p>"
 
-            "<h3>Шаг 6. Перенесите ссылки в программу и выберите качество</h3>"
-            "Вставьте скопированную ссылку в поле <b>Видео URL</b> в приложении.<br>"
-            "• Программа в фоновом режиме автоматически проанализирует поток и выведет удобный выпадающий список <b>Качество видео</b>. Выберите нужное разрешение (1080p, 720p, 480p и т.д.).<br>"
-            "• При необходимости вставьте скопированную ссылку на субтитры в поле <b>Субтитры URL</b> (если они вам нужны). Имя файла сгенерируется автоматически.<br><br>"
+            "<h3 class='guide-step'>Шаг 6. Перенесите ссылки в программу и выберите качество</h3>"
+            "<p>Вставьте скопированную ссылку в поле <b>Видео URL</b> в приложении.</p>"
+            "<p class='guide-item'>• Программа в фоновом режиме автоматически проанализирует поток и выведет удобный выпадающий список <b>Качество видео</b>. Выберите нужное разрешение (1080p, 720p, 480p и т.д.).</p>"
+            "<p class='guide-item'>• При необходимости вставьте скопированную ссылку на субтитры в поле <b>Субтитры URL</b> (если они вам нужны). Имя файла сгенерируется автоматически.</p>"
 
-            "<h3>Шаг 7. Запустите скачивание</h3>"
-            "Выберите папку для сохранения на вашем компьютере и нажмите кнопку <b>🚀 Начать загрузку</b>.<br>"
-            "<i>Программа сама скачает все фрагменты, склеит видео с субтитрами и упакует их в готовый файл без потери качества!</i><br><br>"
+            "<h3 class='guide-step'>Шаг 7. Запустите скачивание</h3>"
+            "<p>Выберите папку для сохранения на вашем компьютере и нажмите кнопку <b>🚀 Начать загрузку</b>.</p>"
+            "<table class='guide-note' width='100%' cellspacing='0' cellpadding='13'><tr><td><p><i>Программа сама скачает все фрагменты, склеит видео с субтитрами и упакует их в готовый файл без потери качества!</i></p></td></tr></table>"
 
             "<h3>🎬 Как запустить скачанное видео и включить субтитры?</h3>"
-            "Поскольку приложение склеивает видео и субтитры в контейнер высокого разрешения <code style='background-color: #3d3d3d; color: #ffffff; padding: 2px 4px; border-radius: 3px;'>.mkv</code>, стандартный плеер Mac (QuickTime Player) не сможет его воспроизвести.<br>"
-            "• <b>Используйте VLC Player:</b> Мы настоятельно рекомендуем скачать и использовать бесплатный плеер <b>VLC Player</b> для воспроизведения ваших фильмов.<br>"
-            "• <b>Как включить субтитры в VLC:</b> Откройте видео в VLC, в верхнем меню Mac выберите: <b>Субтитры -> Дорожка субтитров</b> и выберите нужный язык (например, «Русский» или «Дорожка 1»).<br>"
-            "• <b>Что делать, если субтитры отстают или спешат:</b> Вы можете легко синхронизировать их прямо во время просмотра с помощью горячих клавиш на клавиатуре:<br>"
-            "  - Клавиша <code style='background-color: #3d3d3d; color: #ffffff; padding: 2px 6px; border-radius: 4px; font-family: monospace;'>H</code> — задерживает субтитры (сдвигает их назад на 50 мс за каждое нажатие).<br>"
-            "  - Клавиша <code style='background-color: #3d3d3d; color: #ffffff; padding: 2px 6px; border-radius: 4px; font-family: monospace;'>J</code> — ускоряет субтитры (сдвигает их вперед на 50 мс за каждое нажатие).<br>"
-            "  - С помощью этих клавиш можно идеально выровнять тайминг за пару секунд, если на сайте была заложена нестандартная задержка.<br>"
+            "<p>Поскольку приложение склеивает видео и субтитры в контейнер высокого разрешения <code>.mkv</code>, стандартный плеер Mac (QuickTime Player) не сможет его воспроизвести.</p>"
+            "<p class='guide-item'>• <b>Используйте VLC Player:</b> Мы настоятельно рекомендуем скачать и использовать бесплатный плеер <b>VLC Player</b> для воспроизведения ваших фильмов.</p>"
+            "<p class='guide-item'>• <b>Как включить субтитры в VLC:</b> Откройте видео в VLC, в верхнем меню Mac выберите: <b>Субтитры -> Дорожка субтитров</b> и выберите нужный язык (например, «Русский» или «Дорожка 1»).</p>"
+            "<p class='guide-item'>• <b>Что делать, если субтитры отстают или спешат:</b> Вы можете легко синхронизировать их прямо во время просмотра с помощью горячих клавиш на клавиатуре:</p>"
+            "<p class='guide-item'>  - Клавиша <code>H</code> — задерживает субтитры (сдвигает их назад на 50 мс за каждое нажатие).</p>"
+            "<p class='guide-item'>  - Клавиша <code>J</code> — ускоряет субтитры (сдвигает их вперед на 50 мс за каждое нажатие).</p>"
+            "<p class='guide-item'>  - С помощью этих клавиш можно идеально выровнять тайминг за пару секунд, если на сайте была заложена нестандартная задержка.</p>"
         )
 
-        self.inst_browser.setHtml(inst_html)
+        self.guide_html = inst_html.replace("🚀 Начать загрузку", "Начать загрузку")
         self.inst_browser.anchorClicked.connect(self.on_instruction_image_clicked)
         inst_main_layout.addWidget(self.inst_browser)
+        self.tabs.addTab(self.tab_instructions, "Инструкция")
+        self.tabs.addTab(self.build_about_page(), "О программе")
 
-        self.tabs.addTab(self.tab_instructions, "📖 Инструкция")
-
-        # Добавляем стартовые карточки по умолчанию
         self.add_movie_row()
         self.add_episode_row()
+        self.splitter.addWidget(self.build_download_footer())
+        self.splitter.setStretchFactor(1, 0)
+        self.splitter.setSizes([480, 165])
+        self.tabs.currentChanged.connect(self.show_page)
+        self.show_page(0)
+        self.movie_rows[0].video_url.setFocus()
 
-        self.splitter.addWidget(self.top_container)
+    def build_navigation(self):
+        sidebar = QFrame(objectName="Sidebar")
+        sidebar.setFixedWidth(204)
+        layout = QVBoxLayout(sidebar)
+        layout.setContentsMargins(16, 24, 16, 20)
+        layout.setSpacing(6)
 
-        # ================= НИЖНИЙ БЛОК (ПАПКА + КНОПКИ + ЛОГИ) =================
-        self.bottom_container = QWidget()
-        bottom_layout = QVBoxLayout(self.bottom_container)
-        bottom_layout.setContentsMargins(0, 0, 0, 0)
-        bottom_layout.setSpacing(10)
+        brand = QHBoxLayout()
+        brand.setSpacing(10)
+        self.brand_icon = QLabel()
+        self.brand_icon.setFixedSize(38, 38)
+        brand.addWidget(self.brand_icon)
+        brand.addWidget(QLabel("Stream Video\nDownloader", objectName="Brand"), 1)
+        layout.addLayout(brand)
+        layout.addSpacing(28)
 
-        # Выбор папки
-        dir_layout = QHBoxLayout()
-        self.dir_input = QLineEdit()
-        self.dir_input.setReadOnly(True)
-        self.dir_input.setText(DEFAULT_DOWNLOAD_DIR)
+        self.navigation = QWidget()
+        nav_layout = QVBoxLayout(self.navigation)
+        nav_layout.setContentsMargins(0, 0, 0, 0)
+        nav_layout.setSpacing(4)
+        self.nav_group = QButtonGroup(self.navigation)
+        self.nav_buttons = []
+        for section, entries in (
+            ("ЗАГРУЗКИ", (("Фильмы", "movie"), ("Сериалы", "series"))),
+            ("ПРИЛОЖЕНИЕ", (("Инструкция", "guide"), ("О программе", "info"))),
+        ):
+            if self.nav_buttons:
+                nav_layout.addSpacing(20)
+            nav_layout.addWidget(QLabel(section, objectName="NavSection"))
+            for title, glyph in entries:
+                button = QPushButton(title, objectName="NavButton", checkable=True)
+                button.setIconSize(QSize(22, 22))
+                self.nav_group.addButton(button, len(self.nav_buttons))
+                self.nav_buttons.append((button, glyph))
+                nav_layout.addWidget(button)
+        self.nav_group.idClicked.connect(lambda index: self.tabs.setCurrentIndex(index))
+        layout.addWidget(self.navigation)
+        layout.addStretch()
 
-        self.browse_btn = QPushButton("📁 Папка сохранения...")
-        self.browse_btn.clicked.connect(self.on_browse_clicked)
+        theme_label = QLabel("ТЕМА", objectName="NavSection")
+        theme_selector = QWidget(objectName="ThemeSelector")
+        theme_layout = QHBoxLayout(theme_selector)
+        theme_layout.setContentsMargins(0, 0, 0, 0)
+        theme_layout.setSpacing(4)
+        self.theme_group = QButtonGroup(theme_selector)
+        for label, scheme, palettes in (
+            ("Авто", Qt.ColorScheme.Unknown, (LIGHT, DARK)),
+            ("Светлая", Qt.ColorScheme.Light, (LIGHT,)),
+            ("Тёмная", Qt.ColorScheme.Dark, (DARK,)),
+        ):
+            button = QToolButton(text=label, objectName="ThemeOption", checkable=True)
+            button.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextUnderIcon)
+            button.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+            button.setIcon(appearance_preview(*palettes))
+            button.setIconSize(QSize(44, 28))
+            if scheme == Qt.ColorScheme.Unknown:
+                button.setToolTip("Следовать теме macOS")
+                button.setAccessibleName("Системная тема")
+            self.theme_group.addButton(button, scheme.value)
+            theme_layout.addWidget(button, 1)
 
-        dir_layout.addWidget(self.dir_input, stretch=1)
-        dir_layout.addWidget(self.browse_btn)
-        bottom_layout.addLayout(dir_layout)
+        saved_theme = self.settings.value("appearance", "Unknown", type=str)
+        scheme = Qt.ColorScheme.__members__.get(saved_theme, Qt.ColorScheme.Unknown)
+        self.theme_group.button(scheme.value).setChecked(True)
+        self.theme_group.idClicked.connect(self.change_appearance)
+        theme_label.setBuddy(self.theme_group.button(Qt.ColorScheme.Unknown.value))
+        layout.addWidget(theme_label)
+        layout.addWidget(theme_selector)
+        return sidebar
 
-        # Текстовый статус скачивания (скорость, объем)
-        self.progress_label = QLabel("")
-        self.progress_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.progress_label.setStyleSheet("font-size: 11px; color: #0078d7; margin-bottom: 2px;")
-        self.progress_label.hide()
-        bottom_layout.addWidget(self.progress_label)
+    def add_download_page(self, title, action, callback):
+        page = QWidget()
+        layout = QVBoxLayout(page)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(18)
 
-        # Прогресс-бар
-        self.progress_bar = QProgressBar()
-        self.progress_bar.setRange(0, 100)
-        self.progress_bar.setValue(0)
-        self.progress_bar.hide()
-        bottom_layout.addWidget(self.progress_bar)
+        header = QHBoxLayout()
+        header.addWidget(QLabel(title, objectName="PageTitle"), 1)
+        add_button = QPushButton(action)
+        add_button.clicked.connect(callback)
+        header.addWidget(add_button)
+        layout.addLayout(header)
 
-        # Кнопки Старт / Отмена
-        self.btn_layout = QHBoxLayout()
+        scroll = QScrollArea(widgetResizable=True)
+        content = QWidget(objectName="Queue")
+        rows = QVBoxLayout(content)
+        rows.setContentsMargins(0, 1, 1, 1)
+        rows.setSpacing(12)
+        rows.setAlignment(Qt.AlignmentFlag.AlignTop)
+        scroll.setWidget(content)
+        layout.addWidget(scroll, 1)
+        self.tabs.addTab(page, title)
+        return add_button, rows
 
-        self.download_btn = QPushButton("🚀 Начать загрузку")
-        self.download_btn.setObjectName("greenBtn")
-        self.download_btn.setFixedHeight(45)
-        self.download_btn.clicked.connect(self.on_download_clicked)
-        self.btn_layout.addWidget(self.download_btn)
+    def build_about_page(self):
+        page = QWidget()
+        layout = QVBoxLayout(page)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setAlignment(Qt.AlignmentFlag.AlignCenter)
 
-        self.cancel_btn = QPushButton("❌ Отменить загрузку")
-        self.cancel_btn.setObjectName("redBtn")
-        self.cancel_btn.setFixedHeight(45)
-        self.cancel_btn.hide()
-        self.cancel_btn.clicked.connect(self.on_cancel_clicked)
-        self.btn_layout.addWidget(self.cancel_btn)
-
-        bottom_layout.addLayout(self.btn_layout)
-
-        # Текстовое поле для логов
-        self.log_output = QTextEdit()
-        self.log_output.setReadOnly(True)
-        self.log_output.setFont(QFont("Consolas", 11))
-        bottom_layout.addWidget(self.log_output)
-
-        self.splitter.addWidget(self.bottom_container)
-
-        self.splitter.setSizes([450, 300])
-
-        self.append_log(
-            "Система готова. Настройте файлы и нажмите 'Начать загрузку'. Размеры окон логов и настроек можно менять перетаскиванием разделителя.")
-
-        # ================= Вкладка 4: О программе =================
-        self.tab_about = QWidget()
-        about_layout = QVBoxLayout(self.tab_about)
-        about_layout.setSpacing(15)
-        about_layout.setContentsMargins(30, 40, 30, 40)
-        about_layout.setAlignment(Qt.AlignmentFlag.AlignCenter)
-
-        title_label = QLabel("Stream Video Downloader (β)")
-        title_label.setStyleSheet("font-size: 24px; font-weight: bold; color: #0078d7; margin-bottom: 5px;")
-        title_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        about_layout.addWidget(title_label)
-
-        version_label = QLabel(f"Версия: {CURRENT_VERSION}")
-        version_label.setStyleSheet("font-size: 14px; color: #aaaaaa; font-weight: bold;")
-        version_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        about_layout.addWidget(version_label)
-
-        self.manual_update_btn = QPushButton("🔄 Проверить обновления")
-        self.manual_update_btn.setFixedWidth(220)
-        self.manual_update_btn.setStyleSheet("""
-                    QPushButton { background-color: #2d2d2d; border: 1px solid #3d3d3d; padding: 10px; border-radius: 4px; font-weight: bold; margin-top: 15px;}
-                    QPushButton:hover { background-color: #3d3d3d; border-color: #0078d7; }
-                    QPushButton:pressed { background-color: #1e1e1e; }
-                """)
+        card = QFrame(objectName="Card")
+        card.setMinimumWidth(340)
+        contents = QVBoxLayout(card)
+        contents.setContentsMargins(32, 32, 32, 32)
+        contents.setSpacing(12)
+        self.about_icon = QLabel()
+        contents.addWidget(self.about_icon, alignment=Qt.AlignmentFlag.AlignCenter)
+        title = QLabel("Stream Video Downloader", objectName="CardTitle")
+        contents.addWidget(title, alignment=Qt.AlignmentFlag.AlignCenter)
+        version = QLabel(f"Версия {CURRENT_VERSION}")
+        version.setProperty("muted", True)
+        contents.addWidget(version, alignment=Qt.AlignmentFlag.AlignCenter)
+        contents.addSpacing(8)
+        self.manual_update_btn = QPushButton("Проверить обновления")
         self.manual_update_btn.clicked.connect(self.manual_check_for_updates)
-        about_layout.addWidget(self.manual_update_btn, alignment=Qt.AlignmentFlag.AlignCenter)
+        contents.addWidget(self.manual_update_btn, alignment=Qt.AlignmentFlag.AlignCenter)
+        layout.addWidget(card)
+        return page
 
-        self.tabs.addTab(self.tab_about, "ℹ️ О программе")
+    def build_download_footer(self):
+        footer = QWidget()
+        layout = QVBoxLayout(footer)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(12)
+
+        activity = QFrame(objectName="Activity")
+        activity_layout = QVBoxLayout(activity)
+        activity_layout.setContentsMargins(16, 8, 16, 8)
+        activity_layout.setSpacing(2)
+        activity_header = QHBoxLayout()
+        activity_header.addWidget(QLabel("Журнал загрузок", objectName="ActivityTitle"), 1)
+        self.log_toggle = QPushButton("Свернуть", objectName="Quiet", checkable=True, checked=True)
+        self.log_toggle.toggled.connect(self.toggle_log)
+        activity_header.addWidget(self.log_toggle)
+        activity_layout.addLayout(activity_header)
+        self.log_output = ActivityLog()
+        activity_layout.addWidget(self.log_output, 1)
+        layout.addWidget(activity, 1)
+
+        self.download_controls = QFrame(objectName="DownloadControls")
+        controls = QVBoxLayout(self.download_controls)
+        controls.setContentsMargins(14, 10, 14, 10)
+        controls.setSpacing(8)
+        action_row = QHBoxLayout()
+        action_row.setSpacing(10)
+        self.folder_icon = QLabel()
+        action_row.addWidget(self.folder_icon)
+        destination = QVBoxLayout()
+        destination.setSpacing(0)
+        folder_label = QLabel("Папка сохранения", objectName="FieldLabel")
+        self.dir_input = QLineEdit(DEFAULT_DOWNLOAD_DIR, objectName="Destination", readOnly=True)
+        folder_label.setBuddy(self.dir_input)
+        destination.addWidget(folder_label)
+        destination.addWidget(self.dir_input)
+        action_row.addLayout(destination, 1)
+        self.browse_btn = QPushButton("Выбрать…")
+        self.browse_btn.clicked.connect(self.on_browse_clicked)
+        action_row.addWidget(self.browse_btn)
+        self.download_btn = QPushButton("Начать загрузку", objectName="Primary")
+        self.download_btn.clicked.connect(self.on_download_clicked)
+        action_row.addWidget(self.download_btn)
+        self.pause_btn = QPushButton("Пауза")
+        self.pause_btn.clicked.connect(self.on_pause_clicked)
+        self.pause_btn.hide()
+        action_row.addWidget(self.pause_btn)
+        self.cancel_btn = QPushButton("Отменить", objectName="Danger")
+        self.cancel_btn.clicked.connect(self.on_cancel_clicked)
+        self.cancel_btn.hide()
+        action_row.addWidget(self.cancel_btn)
+        controls.addLayout(action_row)
+
+        progress_row = QHBoxLayout()
+        self.progress_label = QLabel(objectName="ProgressText")
+        self.progress_label.setWordWrap(True)
+        self.progress_percent = QLabel(objectName="ProgressText")
+        progress_row.addWidget(self.progress_label, 1)
+        progress_row.addWidget(self.progress_percent)
+        self.progress_bar = QProgressBar(textVisible=False)
+        controls.addLayout(progress_row)
+        controls.addWidget(self.progress_bar)
+        for widget in (self.progress_label, self.progress_percent, self.progress_bar):
+            widget.hide()
+        layout.addWidget(self.download_controls)
+        return footer
+
+    def toggle_log(self, expanded):
+        self.log_output.setVisible(expanded)
+        self.log_toggle.setText("Свернуть" if expanded else "Развернуть")
+        footer = self.splitter.widget(1)
+        height = 165 if expanded else footer.minimumSizeHint().height()
+        self.splitter.setSizes([self.splitter.height() - height, height])
+
+    def show_page(self, index):
+        self.nav_group.button(index).setChecked(True)
+        self.splitter.widget(1).setVisible(index < 2 or self.queue_rows is not None)
+
+    def change_appearance(self, button_id=None):
+        scheme = Qt.ColorScheme(self.theme_group.checkedId())
+        if button_id is not None:
+            self.settings.setValue("appearance", scheme.name)
+        hints = QApplication.styleHints()
+        if hasattr(hints, "setColorScheme"):
+            hints.setColorScheme(scheme)
+        self.apply_appearance()
+
+    def apply_appearance(self, scheme=None):
+        selected = Qt.ColorScheme(self.theme_group.checkedId())
+        if selected != Qt.ColorScheme.Unknown:
+            scheme = selected
+        elif scheme is None:
+            scheme = QApplication.styleHints().colorScheme()
+        dark = scheme == Qt.ColorScheme.Dark
+        if scheme == Qt.ColorScheme.Unknown:
+            dark = QApplication.palette().color(QPalette.ColorRole.Window).lightness() < 128
+        colors = DARK if dark else LIGHT
+        self.setStyleSheet(STYLE.format(**colors))
+        self.log_output.set_colors(colors)
+        logo = symbol("download", "#ffffff", colors["accent"])
+        self.brand_icon.setPixmap(logo.pixmap(QSize(38, 38)))
+        self.about_icon.setPixmap(logo.pixmap(QSize(48, 48)))
+        for button, glyph in self.nav_buttons:
+            button.setIcon(symbol(glyph, colors["secondary"]))
+        for button in (self.add_movie_btn, self.add_ep_btn):
+            button.setIcon(symbol("plus", colors["text"]))
+            button.setIconSize(QSize(18, 18))
+        self.download_btn.setIcon(symbol("download", "#ffffff"))
+        self.download_btn.setIconSize(QSize(18, 18))
+        self.folder_icon.setPixmap(symbol("folder", colors["secondary"]).pixmap(QSize(25, 25)))
+        scroll = self.inst_browser.verticalScrollBar()
+        position = scroll.value()
+        guide_style = GUIDE_STYLE.format(**colors)
+        self.inst_browser.setHtml(f"<style>{guide_style}</style>{self.guide_html}")
+        scroll.setValue(position)
 
     def add_movie_row(self):
         """Добавляет карточку фильма."""
         row = MovieRowWidget(self.remove_movie_row)
         self.scroll_area_movie_layout.addWidget(row)
         self.movie_rows.append(row)
+        if self.queue_rows is self.movie_rows:
+            self.enqueue_row(row)
+        self.update_row_positions(self.movie_rows)
 
     def remove_movie_row(self, row_widget):
         """Удаляет карточку фильма."""
+        if row_widget is self.active_row:
+            return
         if len(self.movie_rows) <= 1:
-            self.append_log("⚠️ Должна остаться хотя бы одна карточка для скачивания.")
+            self.append_log("Оставьте хотя бы одну карточку.", "warning")
             return
         self.scroll_area_movie_layout.removeWidget(row_widget)
         self.movie_rows.remove(row_widget)
+        if row_widget in self.pending_rows:
+            self.pending_rows.remove(row_widget)
+        row_widget.hide()
         row_widget.cancel_quality_search()
         row_widget.deleteLater()
+        self.update_row_positions(self.movie_rows)
 
     def add_episode_row(self):
         """Добавляет карточку серии."""
         row = EpisodeRowWidget(self.remove_episode_row)
         self.scroll_area_series_layout.addWidget(row)
         self.episode_rows.append(row)
+        if self.queue_rows is self.episode_rows:
+            self.enqueue_row(row)
+        self.update_row_positions(self.episode_rows)
 
     def remove_episode_row(self, row_widget):
         """Удаляет карточку серии."""
+        if row_widget is self.active_row:
+            return
         if len(self.episode_rows) <= 1:
-            self.append_log("⚠️ Должна остаться хотя бы одна карточка для скачивания.")
+            self.append_log("Оставьте хотя бы одну карточку.", "warning")
             return
         self.scroll_area_series_layout.removeWidget(row_widget)
         self.episode_rows.remove(row_widget)
+        if row_widget in self.pending_rows:
+            self.pending_rows.remove(row_widget)
+        row_widget.hide()
         row_widget.cancel_quality_search()
         row_widget.deleteLater()
+        self.update_row_positions(self.episode_rows)
 
-    def append_log(self, message):
-        self.log_output.append(message)
-        self.log_output.verticalScrollBar().setValue(self.log_output.verticalScrollBar().maximum())
+    @staticmethod
+    def update_row_positions(rows):
+        for position, row in enumerate(rows, start=1):
+            row.set_position(position, can_remove=len(rows) > 1)
+
+    def append_log(self, message, level="info"):
+        self.log_output.add_entry(message, level)
 
     def update_progress(self, percent, status_text):
-        if not self.progress_bar.isVisible():
-            self.progress_bar.show()
-            self.progress_label.show()
         self.progress_bar.setValue(percent)
-        self.progress_label.setText(status_text)
+        self.progress_percent.setText(f"{percent}%")
+        if status_text:
+            self.progress_text = status_text
+        if self.active_row is not None and not self.logic.control.paused and not self.logic.control.cancelled:
+            self.progress_label.setText(f"{self.active_row.title.text()} · {self.progress_text}")
+        for widget in (self.progress_label, self.progress_percent, self.progress_bar):
+            widget.show()
 
     def on_browse_clicked(self):
         selected_directory = QFileDialog.getExistingDirectory(
@@ -412,75 +516,70 @@ class MainWindow(QMainWindow):
             self.dir_input.setText(selected_directory)
 
     def on_download_clicked(self):
-        active_index = self.tabs.currentIndex()
-        queue = []
+        if self.queue_rows is not None:
+            return
+        page = self.tabs.currentIndex()
+        if page not in (0, 1):
+            return
+        rows = self.movie_rows if page == 0 else self.episode_rows
+        for row in rows:
+            item = row.download_options()
+            if not (item['video_url'] or item['sub_url']):
+                self.append_log(f"Укажите ссылку на видео или субтитры в карточке «{row.title.text()}».", "warning")
+                return
 
-        if active_index == 0:  # Режим Фильма
-            for i, row in enumerate(self.movie_rows):
-                video_url = row.selected_video_url()
-                sub_url = row.sub_url.text().strip()
-                output_name = row.filename.text().strip()
-
-                # Читаем выбранное качество из QComboBox
-                selected_height = row.quality_combo.currentData() or "best"
-
-                if not video_url and not sub_url:
-                    self.append_log(
-                        f"⚠️ Ошибка: В карточке фильма #{i + 1} нужно указать ссылку на видео или субтитры!")
-                    return
-
-                queue.append({
-                    'video_url': video_url,
-                    'sub_url': sub_url,
-                    'output_name': output_name,
-                    'selected_height': selected_height  # <-- Передаем выбранное качество!
-                })
-        else:  # Режим Сериала
-            for i, row in enumerate(self.episode_rows):
-                video_url = row.selected_video_url()
-                sub_url = row.sub_url.text().strip()
-                output_name = row.filename.text().strip()
-
-                # Читаем выбранное качество из QComboBox
-                selected_height = row.quality_combo.currentData() or "best"
-
-                if not video_url and not sub_url:
-                    self.append_log(f"⚠️ Ошибка: В карточке серии #{i + 1} нужно указать ссылку на видео или субтитры!")
-                    return
-
-                queue.append({
-                    'video_url': video_url,
-                    'sub_url': sub_url,
-                    'output_name': output_name,
-                    'selected_height': selected_height  # <-- Передаем выбранное качество!
-                })
-
-        download_dir = self.dir_input.text().strip()
-
-        self.tabs.setEnabled(False)
+        self.queue_rows = rows
+        self.pending_rows = []
+        for row in rows:
+            self.enqueue_row(row)
+        self.queue_dir = self.dir_input.text().strip()
+        self.queue_position = 0
+        self.queue_has_errors = False
+        self.logic.start_queue()
         self.browse_btn.setEnabled(False)
-        self.add_movie_btn.setEnabled(False)
-        self.add_ep_btn.setEnabled(False)
-
-        for r in self.movie_rows: r.setEnabled(False)
-        for r in self.episode_rows: r.setEnabled(False)
-
         self.download_btn.hide()
+        self.pause_btn.show()
         self.cancel_btn.show()
+        self.start_next_download()
 
-        self.progress_bar.setValue(0)
-        self.progress_bar.show()
+    def enqueue_row(self, row):
+        row.set_download_status("В очереди")
+        self.pending_rows.append(row)
 
-        self.progress_label.setText("Запуск загрузки...")  # Сбрасываем текст
-        self.progress_label.show()
+    def start_next_download(self):
+        if self.logic.control.paused:
+            return
+        if not self.pending_rows:
+            self.finish_queue()
+            return
 
-        self.logic.start_download(queue, download_dir)
+        row = self.pending_rows[0]
+        item = row.download_options()
+        if not (item['video_url'] or item['sub_url']):
+            row.set_download_status("Нужна ссылка")
+            self.pause_queue(f"Добавьте ссылку в карточке «{row.title.text()}» и продолжите загрузку.")
+            return
+
+        self.pending_rows.pop(0)
+        self.active_row = row
+        row.cancel_quality_search()
+        row.refresh_quality_btn.setEnabled(True)
+        if row.quality_combo.currentText() == "Поиск качества…":
+            row.quality_combo.setItemText(row.quality_combo.currentIndex(), "Авто (Максимальное)")
+        row.setEnabled(False)
+        row.set_download_status("Загрузка")
+        self.queue_position += 1
+        total = self.queue_position + len(self.pending_rows)
+        title = item['output_name'] or row.title.text()
+        self.append_log(f"{self.queue_position} из {total} · {title}", "start")
+        self.update_progress(0, "Подготовка")
+        self.logic.start_download(item, self.queue_dir)
 
     def check_for_updates(self):
         """Запускает фоновую проверку обновлений на GitHub."""
         self.updater_thread = UpdateChecker(CURRENT_VERSION, GITHUB_OWNER, GITHUB_REPO)
         self.updater_thread.update_available.connect(self.on_update_available)
-        self.updater_thread.error.connect(lambda err: self.append_log(f"⚠️ {err}"))
+        self.updater_thread.error.connect(lambda err: self.append_log(err, "warning"))
         self.updater_thread.start()
 
     def on_update_available(self, version, changelog, download_url):
@@ -514,7 +613,7 @@ class MainWindow(QMainWindow):
     def on_update_downloaded(self, extracted_app_path):
         """Закрывает окно прогресса и запускает установку."""
         self.upd_progress_dialog.close()
-        self.append_log("🔄 Установка обновления... Приложение сейчас будет перезапущено.")
+        self.append_log("Установка обновления. Приложение перезапустится.")
         apply_update_and_restart(extracted_app_path)
 
     def on_update_error(self, error_msg):
@@ -523,31 +622,82 @@ class MainWindow(QMainWindow):
             self.upd_progress_dialog.close()
         QMessageBox.critical(self, "Ошибка обновления", f"Не удалось обновить приложение:\n{error_msg}")
 
+    def pause_queue(self, message):
+        self.logic.pause()
+        self.pause_btn.setText("Продолжить")
+        self.progress_text = message
+        self.progress_label.setText(message)
+        if self.active_row is not None:
+            self.active_row.set_download_status("Пауза")
+        self.append_log(message)
+
+    def on_pause_clicked(self):
+        if self.queue_rows is None or self.logic.control.cancelled:
+            return
+        if self.logic.control.paused:
+            self.logic.resume()
+            self.pause_btn.setText("Пауза")
+            self.append_log("Загрузка возобновлена")
+            if self.active_row is None:
+                self.start_next_download()
+            else:
+                self.active_row.set_download_status("Загрузка")
+                self.update_progress(self.progress_bar.value(), "Загрузка возобновлена")
+        else:
+            message = f"{self.active_row.title.text()} · Пауза" if self.active_row else "Очередь на паузе"
+            self.pause_queue(message)
+
     def on_cancel_clicked(self):
+        if self.queue_rows is None:
+            return
         self.cancel_btn.setEnabled(False)
+        self.pause_btn.setEnabled(False)
         self.logic.cancel()
+        self.progress_label.setText("Остановка загрузки…")
+        if self.active_row is None:
+            self.finish_queue()
 
-    def handle_download_done(self):
-        self.tabs.setEnabled(True)
+    def handle_download_done(self, status):
+        row = self.active_row
+        row.setEnabled(True)
+        row.set_download_status({"success": "Готово", "error": "Ошибка", "cancelled": "Отменено"}[status])
+        self.active_row = None
+        self.queue_has_errors |= status == 'error'
+        if self.logic.control.cancelled:
+            self.finish_queue()
+        else:
+            self.start_next_download()
+
+    def finish_queue(self):
+        if self.logic.control.cancelled:
+            self.append_log("Очередь отменена")
+        elif self.queue_has_errors:
+            self.append_log("Очередь завершена с ошибками", "warning")
+        else:
+            self.append_log("Загрузка очереди завершена", "success")
+
+        for row in self.pending_rows:
+            row.set_download_status("")
+        self.pending_rows.clear()
+        self.queue_rows = None
         self.browse_btn.setEnabled(True)
-        self.add_movie_btn.setEnabled(True)
-        self.add_ep_btn.setEnabled(True)
-
-        for r in self.movie_rows: r.setEnabled(True)
-        for r in self.episode_rows: r.setEnabled(True)
-
         self.download_btn.show()
-        self.cancel_btn.hide()
-        self.cancel_btn.setEnabled(True)
-        self.progress_bar.hide()
-        self.progress_label.hide() # <-- Скрываем статус-лейбл при завершении
+        self.pause_btn.setText("Пауза")
+        for button in (self.pause_btn, self.cancel_btn):
+            button.hide()
+            button.setEnabled(True)
+        for widget in (self.progress_label, self.progress_percent, self.progress_bar):
+            widget.hide()
+        self.show_page(self.tabs.currentIndex())
+        if self.close_after_queue:
+            QTimer.singleShot(0, self.close)
 
     def manual_check_for_updates(self):
         """Ручной запуск проверки обновлений по кнопке во вкладке."""
-        self.append_log("🔍 Ручная проверка наличия обновлений...")
+        self.append_log("Проверка обновлений")
         self.manual_update_btn.setEnabled(False)
-        self.manual_update_btn.setText("⏳ Проверяю...")
-        self.manual_update_found = False
+        self.manual_update_btn.setText("Проверяю…")
+        self.manual_check_reported = False
 
         self.manual_updater = UpdateChecker(CURRENT_VERSION, GITHUB_OWNER, GITHUB_REPO)
         self.manual_updater.update_available.connect(self.on_manual_update_available)
@@ -557,26 +707,25 @@ class MainWindow(QMainWindow):
 
     def on_manual_update_available(self, version, changelog, download_url):
         """Вызывается, если при ручной проверке найдено обновление."""
-        self.manual_update_found = True
+        self.manual_check_reported = True
         self.on_update_available(version, changelog, download_url)
 
     def on_manual_check_finished(self):
         """Вызывается, когда поток проверки завершил работу."""
         self.manual_update_btn.setEnabled(True)
-        self.manual_update_btn.setText("🔄 Проверить обновления")
+        self.manual_update_btn.setText("Проверить обновления")
 
-        if not self.manual_update_found:
+        if not self.manual_check_reported:
             QMessageBox.information(
                 self, "Обновления",
                 "У вас установлена самая актуальная версия программы!"
             )
-            self.append_log("✅ Проверка завершена: у вас установлена последняя версия программы.")
+            self.append_log("Установлена последняя версия приложения.", "success")
 
     def on_manual_check_error(self, err_msg):
         """Вызывается при ошибке сети во время ручной проверки."""
-        self.manual_update_btn.setEnabled(True)
-        self.manual_update_btn.setText("🔄 Проверить обновления")
-        self.on_update_error(err_msg)
+        self.manual_check_reported = True
+        QMessageBox.warning(self, "Не удалось проверить обновления", err_msg)
 
     def on_instruction_image_clicked(self, url):
         """Открывает скриншот в красивом модальном окне, масштабируя его под размер экрана."""
